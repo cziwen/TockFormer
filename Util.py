@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 
 
-def create_sequences (data, seq_length, target_cols=None):
+def create_sequences (data, seq_length, target_cols=None, scaler=None):
     """
     将 DataFrame 数据转换为模型的序列样本。时间会默认排除在外
 
@@ -13,25 +13,27 @@ def create_sequences (data, seq_length, target_cols=None):
       - data: pd.DataFrame，包含特征列（数据假设已按时间顺序排列）
       - seq_length: 每个序列的长度
       - target_cols: 指定用于作为目标的列名，默认为 None，表示使用所有列
+      - scaler: 可选 MinMaxScaler，用于共享训练数据的缩放器
+
     返回：
-      - X_Tensor (shape: (samples, seq_length, F))，F为特征总数
-      - y_Tensor (shape: (samples, T))，T为目标列的数量（若 target_cols 为 None，则 T=F）
+      - X_Tensor (samples, seq_length, F)
+      - y_Tensor (samples, T)
+      - scaler（MinMaxScaler 实例）
+      - target_indices（用于 inverse_transform）
     """
+    feature_columns = data.columns.tolist ()[1:]  # 排除第一列时间戳
 
-    # 获取所有列作为特征
-    feature_columns = data.columns.tolist()[1:] # 默认排除第一列，因为是 时间戳
-
-    # scale 数据
-    scaler = MinMaxScaler (feature_range=(0, 1))
     df_scaled = data.copy ()
-    # 除了第一列 时间戳 之外，其他列直接转换为 float32
     df_scaled[df_scaled.columns[1:]] = df_scaled[df_scaled.columns[1:]].astype (np.float32)
-    df_scaled.iloc[:, 1:] = scaler.fit_transform (df_scaled.iloc[:, 1:]).astype (np.float32) # norm
 
+    if scaler is None:
+        scaler = MinMaxScaler (feature_range=(0, 1))
+        scaler.fit (df_scaled.iloc[:, 1:])  # 只 fit 特征列
+
+    df_scaled.iloc[:, 1:] = scaler.transform (df_scaled.iloc[:, 1:]).astype (np.float32)
 
     data_array = df_scaled[feature_columns].values
 
-    # 根据 target_cols 参数，确定目标列的索引
     if target_cols is None:
         target_indices = list (range (len (feature_columns)))
     elif isinstance (target_cols, str):
@@ -42,17 +44,16 @@ def create_sequences (data, seq_length, target_cols=None):
         raise ValueError ("target_cols 参数必须为 None, str 或 list")
 
     X, y = [], []
-    # 使用滑动窗口生成序列和对应目标
     for i in range (len (data_array) - seq_length):
         X.append (data_array[i: i + seq_length])
         y.append (data_array[i + seq_length][target_indices])
 
     X_tensor = torch.tensor (np.array (X), dtype=torch.float32)
     y_tensor = torch.tensor (np.array (y), dtype=torch.float32)
-    return X_tensor, y_tensor
+    return X_tensor, y_tensor, scaler, target_indices
 
 
-def plot_metric(values, y_label='Value', title='Training Metric', color='blue', show=True):
+def plot_metric (values, y_label='Value', title='Training Metric', color='blue', show=True):
     """
     绘制折线图
 
@@ -67,20 +68,19 @@ def plot_metric(values, y_label='Value', title='Training Metric', color='blue', 
     >>> loss_values = [0.9, 0.8, 0.7, 0.65, 0.6]
     >>> plot_metric(loss_values, y_label='Loss', title='Training Loss over Epochs', color='red')
     """
-    epochs = range(1, len(values) + 1)  # 构造 x 轴，从 1 到 len(values)
-    plt.figure(figsize=(8, 6))
-    plt.plot(epochs, values, marker='o', linestyle='-', color=color)
-    plt.xlabel('Num Epoch')
-    plt.ylabel(y_label)
-    plt.title(title)
-    plt.grid(True)
+    epochs = range (1, len (values) + 1)  # 构造 x 轴，从 1 到 len(values)
+    plt.figure (figsize=(8, 6))
+    plt.plot (epochs, values, marker='o', linestyle='-', color=color)
+    plt.xlabel ('Num Epoch')
+    plt.ylabel (y_label)
+    plt.title (title)
+    plt.grid (True)
 
     if show:
-        plt.show()
+        plt.show ()
 
 
-
-def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value', title='Training Metric', color='blue', show=True):
+def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value', title='Training Metric'):
     """
     绘制多个曲线，并叠加在同一个图上。
 
@@ -95,7 +95,13 @@ def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value'
     colors = plt.cm.tab10 (np.linspace (0, 1, len (accuracy_curve_dict)))
 
     for i, (label, acc_curve) in enumerate (accuracy_curve_dict.items ()):
-        plt.plot (range (1, len (acc_curve) + 1), acc_curve, marker='o', linestyle='-', label=label,
+        plt.plot (range (1, len (acc_curve) + 1),
+                  acc_curve,
+                  # marker='o',
+                  # markersize=8,  # 增大标记大小
+                  linestyle='-',
+                  linewidth=1,  # 增加线宽
+                  label=label,
                   color=colors[i % 10])
 
     plt.xlabel (x_label)
@@ -104,3 +110,13 @@ def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value'
     plt.legend ()
     plt.grid (True)
     plt.show ()
+
+
+def safeLoadCSV (df):
+    # 检查data前几个数据是否有nan，如果有，则舍弃前n行。
+    if df.isna ().any ().any ():  # 检查是否有 NaN
+        first_valid_index = df.dropna ().index[0]  # 找到第一个非 NaN 数据的索引
+        df = df.loc[first_valid_index:]  # 丢弃 NaN 之前的数据
+        df = df.dropna ().reset_index (drop=True)  # 重新索引，确保连续性
+
+    return df

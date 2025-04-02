@@ -8,12 +8,13 @@ print ("=" * 10 + " 创建/加载模型中... " + "=" * 10)
 
 # 超参数设置
 batch_size = 32
-seq_length = 30
-input_dim = 24
+seq_length = 32
+input_dim = 33
 model_dim = 64
 num_heads = 4
 num_layers = 2
 output_dim = 4
+
 
 # 加载模型
 model = TimeSeriesTransformer (
@@ -21,16 +22,16 @@ model = TimeSeriesTransformer (
     model_dim=model_dim,
     num_heads=num_heads,
     num_layers=num_layers,
-    dropout=0.1,
+    dropout=0.2,
     seq_length=seq_length,
     output_dim=output_dim
 )
-model.load_state_dict (torch.load ("models/model_1.pth"))
-scaler_pre = joblib.load ("models/scaler_1.pkl")
+model.load_state_dict (torch.load ("models/model_34d_5min.pth"))
+scaler_pre = joblib.load ("models/scaler_34d_5min.pkl")
 
 # 加载测试数据
 print ("=" * 10 + " 载入数据中... " + "=" * 10)
-test_dataset_df = safeLoadCSV (pd.read_csv ("factoredData/val_data_5min_p.csv"))
+test_dataset_df = safeLoadCSV (pd.read_csv ("readyData/SPY_5min_test_f.csv"))
 x_test, y_test, _, target_indices = create_sequences (test_dataset_df, seq_length=seq_length, scaler=scaler_pre,
                                                       target_cols=['open', 'high', 'low', 'close'])
 test_dataset = TensorDataset (x_test, y_test)
@@ -50,7 +51,7 @@ print (f'R2: {r2_list}')
 
 # 可视化预测结果
 curve_dict = {
-    'Close_pred': preds[:, 0],
-    'Close_actual': actuals[:, 0]
+    'Close_pred': preds[:, 3],
+    'Close_actual': actuals[:, 3]
 }
 plot_multiple_curves (curve_dict, x_label='interval', y_label='price', title='Close Comparison')

@@ -42,9 +42,9 @@ def calculate_macd (prices, short=7, long=14, signal=5):
 
 
 def calculate_stochastic (df, period=14, smooth_k=3, signal=5):
-    high = df['High'].rolling (period).max ()
-    low = df['Low'].rolling (period).min ()
-    k_raw = (df['Close'] - low) / (high - low) * 100
+    high = df['high'].rolling (period).max ()
+    low = df['low'].rolling (period).min ()
+    k_raw = (df['close'] - low) / (high - low) * 100
     k_smooth = k_raw.rolling (smooth_k).mean ()
     d = k_smooth.rolling (signal).mean ()
     return k_smooth, d
@@ -60,7 +60,7 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
     '''
     df = pd.read_csv (csv_path)
 
-    for col in ['Open', 'High', 'Low', 'Close']:
+    for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[f'RSI_{col}'] = calculate_rsi (df[col].values, period=14)
             macd, signal_line, hist = calculate_macd (df[col].values)
@@ -68,7 +68,7 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
             df[f'MACD_signal_{col}'] = signal_line
             df[f'MACD_histogram_{col}'] = hist
 
-    if all (col in df.columns for col in ['High', 'Low', 'Close']):
+    if all (col in df.columns for col in ['high', 'low', 'close']):
         k, d = calculate_stochastic (df)
         df['Stoch_K'] = k
         df['Stoch_D'] = d
@@ -81,7 +81,7 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
     print (f"✔️ Factors added and saved to {output_path}")
 
 
-def clean_price_outliers(df, columns=None, z_thresh=5):
+def clean_price_outliers (df, columns=None, z_thresh=5):
     """
     清洗 DataFrame 中价格类或数值类字段的异常值：
     - 若未指定 columns，则自动选择所有数值列
@@ -89,7 +89,7 @@ def clean_price_outliers(df, columns=None, z_thresh=5):
     - 填充完成后，再统一 drop 含 NaN 的整行
     """
     if columns is None:
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        columns = df.select_dtypes (include=[np.number]).columns.tolist ()
 
     total_replaced = 0
 
@@ -97,26 +97,26 @@ def clean_price_outliers(df, columns=None, z_thresh=5):
         if col not in df.columns:
             continue
 
-        series = df[col].copy()
-        z_scores = (series - series.mean()) / series.std()
-        outliers = np.abs(z_scores) > z_thresh
-        outlier_indices = np.where(outliers)[0]
+        series = df[col].copy ()
+        z_scores = (series - series.mean ()) / series.std ()
+        outliers = np.abs (z_scores) > z_thresh
+        outlier_indices = np.where (outliers)[0]
 
-        print(f"检测到 {len(outlier_indices)} 个异常值在 {col} 列")
+        print (f"检测到 {len (outlier_indices)} 个异常值在 {col} 列")
 
         for i in outlier_indices:
             left = None
             right = None
 
             # 向前找邻居
-            for j in range(i - 1, -1, -1):
-                if not outliers[j] and not pd.isna(series[j]):
+            for j in range (i - 1, -1, -1):
+                if not outliers[j] and not pd.isna (series[j]):
                     left = series[j]
                     break
 
             # 向后找邻居
-            for j in range(i + 1, len(series)):
-                if not outliers[j] and not pd.isna(series[j]):
+            for j in range (i + 1, len (series)):
+                if not outliers[j] and not pd.isna (series[j]):
                     right = series[j]
                     break
 
@@ -129,34 +129,55 @@ def clean_price_outliers(df, columns=None, z_thresh=5):
         df[col] = series
 
     # 统一删除含 NaN 的整行
-    original_len = len(df)
-    df.dropna(inplace=True)
-    dropped_rows = original_len - len(df)
+    original_len = len (df)
+    df.dropna (inplace=True)
+    dropped_rows = original_len - len (df)
 
-    print(f"✅ 替换了 {total_replaced} 个异常值")
-    print(f"❌ 删除了 {dropped_rows} 行（因为存在 NaN）")
+    print (f"✅ 替换了 {total_replaced} 个异常值")
+    print (f"❌ 删除了 {dropped_rows} 行（因为存在 NaN）")
 
     return df
 
 
 def aggregate_high_freq_to_low (df, freq='1h'):
     """
-    将高频数据（带时间戳）聚合为低频数据，用于大时间粒度建模的因子构造
+    使用标准差等波动性指标替代原始价格信息，保留趋势性因子
     """
     df['timestamp'] = pd.to_datetime (df['timestamp'])
     df.set_index ('timestamp', inplace=True)
 
+    # 使用标准差来表示 open, high, low, close, volume 的波动性
     df_agg = df.resample (freq).agg ({
-        'open': ['first', 'mean', 'std'],
-        'high': ['max', 'mean'],
-        'low': ['min', 'mean'],
-        'close': ['last', 'mean', 'std'],
-        'volume': ['sum', 'mean']
+        'open': 'std',
+        'high': 'std',
+        'low': 'std',
+        'close': 'std',
+        'volume': 'std'
     })
 
-    df_agg.columns = ['_'.join (col).strip () for col in df_agg.columns.values]
-    df_agg.reset_index (inplace=True)
+    df_agg.rename (columns={
+        'open': f'open_volatility',
+        'high': 'high_volatility',
+        'low': 'low_volatility',
+        'close': 'close_volatility',
+        'volume': 'volume_volatility'
+    }, inplace=True)
 
+    # 重新计算额外趋势性因子（用原始数据做 resample）
+    df_extras = df.resample (freq).agg ({
+        'high': 'max',
+        'low': 'min',
+        'open': 'first',
+        'close': 'last'
+    })
+
+    # 衍生趋势因子
+    df_agg['price_range'] = df_extras['high'] - df_extras['low']
+    df_agg['body_size'] = (df_extras['close'] - df_extras['open']).abs ()
+    # df_agg['direction'] = np.sign (df_extras['close'] - df_extras['open'])
+    df_agg['return_pct'] = (df_extras['close'] - df_extras['open']) / df_extras['open']
+
+    df_agg.reset_index (inplace=True)
     return df_agg
 
 
@@ -168,7 +189,7 @@ def process_high_freq_to_low (csv_path, output_dir="aggregatedData", freq='1h'):
     df = pd.read_csv (csv_path)
 
     print ("\n清洗 open high low close 异常值:")
-    df = clean_price_outliers (df, columns= ['open', 'high', 'low', 'close'], z_thresh=5)
+    df = clean_price_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
 
     # 聚合为低频
     df_low = aggregate_high_freq_to_low (df, freq=freq)
@@ -193,6 +214,33 @@ def join_csv_on_timestamp (csv1, csv2, output_file, how='inner'):
     print (f"✅ Join complete. Saved to {output_file} ({len (df_merged)} rows)")
 
 
-process_high_freq_to_low ("rawdata/SPY_30minute_train.csv")
-# join_csv_on_timestamp ("rawdata/SPY_1hour_train.csv", "aggregatedData/SPY_1minute_train_agg_1H.csv", "leftJoined.csv",
+
+#
+# process_high_freq_to_low ("rawdata/SPY_1minute_test.csv", freq='5min')
+# process_high_freq_to_low ("rawdata/SPY_5minute_test.csv", freq='30min')
+# process_high_freq_to_low ("rawdata/SPY_15minute_test.csv", freq='1h')
+#
+#
+#
+# add_factors_to_csv('rawdata/SPY_1hour_test.csv')
+# add_factors_to_csv('rawdata/SPY_30minute_test.csv')
+# add_factors_to_csv('rawdata/SPY_5minute_test.csv')
+
+
+
+
+
+# join_csv_on_timestamp ("factoredData/SPY_1hour_test_factored.csv", "aggregatedData/SPY_15minute_test_agg_1h.csv",
+#                        "readyData/SPY_1hour_test_f.csv",
 #                        how='inner')
+#
+# join_csv_on_timestamp ("factoredData/SPY_30minute_test_factored.csv", "aggregatedData/SPY_5minute_test_agg_30min.csv",
+#                        "readyData/SPY_30min_test_f.csv",
+#                        how='inner')
+#
+# join_csv_on_timestamp ("factoredData/SPY_5minute_test_factored.csv", "aggregatedData/SPY_1minute_test_agg_5min.csv",
+#                        "readyData/SPY_5min_test_f.csv",
+#                        how='inner')
+
+# df = pd.read_csv ('readyData/SPY_1hour_test_f.csv')
+# print(df.shape)

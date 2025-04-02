@@ -60,7 +60,7 @@ class TimeSeriesTransformer (nn.Module):
 
         # 将原始输入映射到模型维度
         self.input_linear = nn.Linear (input_dim, model_dim)
-        self.input_norm = nn.LayerNorm (model_dim)
+        # self.input_norm = nn.LayerNorm (model_dim) # 可选
 
         # 位置编码模块
         self.positional_encoding = PositionalEncoding (model_dim, dropout=dropout, max_len=seq_length)
@@ -75,7 +75,7 @@ class TimeSeriesTransformer (nn.Module):
             nn.ReLU (),
             nn.Linear (64, output_dim)
         )
-        self.output_norm = nn.LayerNorm (model_dim)
+        # self.output_norm = nn.LayerNorm (model_dim) # 可选
 
     def forward (self, src):
         """
@@ -84,7 +84,7 @@ class TimeSeriesTransformer (nn.Module):
         """
         # 线性映射并缩放
         src = self.input_linear (src) * math.sqrt (self.model_dim)
-        src = self.input_norm (src)  # <--- 新加的
+        # src = self.input_norm (src)  # 可选
         # 添加位置编码
         src = self.positional_encoding (src)
         # Transformer 要求的输入形状为 [seq_length, batch_size, model_dim]
@@ -94,11 +94,11 @@ class TimeSeriesTransformer (nn.Module):
         # 转换回 [batch_size, seq_length, model_dim]
         encoder_output = encoder_output.transpose (0, 1)
         # 此处采用最后一个时间步的输出作为整体序列的表示，也可以根据需求做其他聚合（如均值、加权等）
-        encoder_output = self.output_norm (encoder_output)  # 可选
+        # encoder_output = self.output_norm (encoder_output)  # 可选
         out = self.output_regressor (encoder_output[:, -1, :])
         return out
 
-    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[1, 2, 3, 4]):
+    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3]):
         """
         在验证集上评估模型，计算每个目标特征的 MSE、R² 并返回预测值与真实值（已逆缩放）
 
@@ -202,7 +202,7 @@ class TimeSeriesTransformer (nn.Module):
 
             if val_dataset is not None:
                 mse_list, r2_list, _, _ = self.evaluate_model (val_dataset, batch_size=batch_size,
-                                                          scaler=scaler, target_indices=target_indices)
+                                                               scaler=scaler, target_indices=target_indices)
                 val_mse_lists.append (mse_list)
                 val_r2_lists.append (r2_list)
 

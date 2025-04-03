@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
-import shap
-
-from src.efficient_kan import KAN
-from torch import optim
+# import shap
+#
+# from src.efficient_kan import KAN
+# from torch import optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_squared_error, r2_score
 

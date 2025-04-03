@@ -25,7 +25,10 @@ def evaluate_model_main(test_csv, model_path, scaler_path,
         seq_length=seq_length,
         output_dim=output_dim
     )
-    model.load_state_dict(torch.load(model_path))
+
+    device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
+    model.load_state_dict (torch.load ("models/model_34d_5min.pth", map_location=device))
+    model.to (device)
     scaler = joblib.load(scaler_path)
 
     print("=" * 10 + " 加载测试数据... " + "=" * 10)

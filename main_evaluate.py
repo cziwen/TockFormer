@@ -67,11 +67,13 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, required=True, help='模型文件路径（.pth）')
     parser.add_argument('--scaler', type=str, required=True, help='Scaler 文件路径（.pkl）')
     parser.add_argument('--batch_size', type=int, default=32, help='批大小')
+    parser.add_argument ('--sequential_length', type=int, default=32, help='序列长度')
     args = parser.parse_args()
 
     evaluate_model_main(
         test_csv=args.test,
         model_path=args.model,
         scaler_path=args.scaler,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        seq_length=args.sequential_length,
     )

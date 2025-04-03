@@ -76,6 +76,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="批大小")
     parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
+    parser.add_argument ("--sequential_length", type=int, default=32, help="序列长度")
 
     args = parser.parse_args()
 
@@ -86,5 +87,6 @@ if __name__ == "__main__":
         scaler_out=args.scaler_out,
         batch_size=args.batch_size,
         epochs=args.epochs,
-        lr=args.lr
+        lr=args.lr,
+        seq_length=args.sequential_length,
     )

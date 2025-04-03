@@ -27,7 +27,7 @@ def evaluate_model_main(test_csv, model_path, scaler_path,
     )
 
     device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
-    model.load_state_dict (torch.load ("models/model_34d_5min.pth", map_location=device))
+    model.load_state_dict (torch.load (model_path, map_location=device))
     model.to (device)
     scaler = joblib.load(scaler_path)
 
@@ -71,6 +71,14 @@ if __name__ == "__main__":
     parser.add_argument('--scaler', type=str, required=True, help='Scaler 文件路径（.pkl）')
     parser.add_argument('--batch_size', type=int, default=32, help='批大小')
     parser.add_argument ('--sequential_length', type=int, default=32, help='序列长度')
+    parser.add_argument ("--input_dim", type=int, required=True, help="模型输入维度")
+    parser.add_argument ("--output_dim", type=int, required=True, help="模型输出维度")
+    parser.add_argument ("--num_layers", type=int, required=True, help="模型层数")
+    parser.add_argument ("--num_heads", type=int, required=True, help="注意力头数")
+    parser.add_argument ("--dropout", type=float, default=0.2, help="Dropout")
+
+
+
     args = parser.parse_args()
 
     evaluate_model_main(
@@ -79,4 +87,9 @@ if __name__ == "__main__":
         scaler_path=args.scaler,
         batch_size=args.batch_size,
         seq_length=args.sequential_length,
+        input_dim=args.input_dim,
+        output_dim=args.output_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        dropout=args.dropout
     )

@@ -76,7 +76,12 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=30, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="批大小")
     parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
-    parser.add_argument ("--sequential_length", type=int, default=32, help="序列长度")
+    parser.add_argument("--sequential_length", type=int, default=32, help="序列长度")
+    parser.add_argument("--input_dim", type=int, required=True, help="模型输入维度")
+    parser.add_argument("--output_dim", type=int, required=True, help="模型输出维度")
+    parser.add_argument ("--num_layers", type=int, required=True, help="模型层数")
+    parser.add_argument ("--num_heads", type=int, required=True, help="注意力头数")
+    parser.add_argument ("--dropout", type=float, required=True, help="Dropout")
 
     args = parser.parse_args()
 
@@ -89,4 +94,9 @@ if __name__ == "__main__":
         epochs=args.epochs,
         lr=args.lr,
         seq_length=args.sequential_length,
+        input_dim=args.input_dim,
+        output_dim=args.output_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        dropout=args.dropout,
     )

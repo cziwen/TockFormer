@@ -307,38 +307,31 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
     print (f"已生成新的 CSV 文件：{output_csv}")
 
 
-process_high_freq_to_low ("rawdata/SPY_15minute_test.csv", freq='1h')
-process_high_freq_to_low ("rawdata/SPY_15minute_validate.csv", freq='1h')
-process_high_freq_to_low ("rawdata/SPY_15minute_train.csv", freq='1h')
+# 把高频转换低频数据
+process_high_freq_to_low ("rawdata/SPY_10minute_test.csv", freq='30min')
+process_high_freq_to_low ("rawdata/SPY_10minute_validate.csv", freq='30min')
+process_high_freq_to_low ("rawdata/SPY_10minute_train.csv", freq='30min')
 
-add_factors_to_csv ("rawData/SPY_1hour_test.csv")
-add_factors_to_csv ("rawData/SPY_1hour_train.csv")
-add_factors_to_csv ("rawData/SPY_1hour_validate.csv")
+# 添加因子
+add_factors_to_csv ("rawData/SPY_30minute_test.csv")
+add_factors_to_csv ("rawData/SPY_30minute_train.csv")
+add_factors_to_csv ("rawData/SPY_30minute_validate.csv")
 
-join_csv_on_timestamp ("factoredData/SPY_1hour_test_factored.csv",
-                       "aggregatedData/SPY_15minute_test_agg_1h.csv",
-                       output_file="readyData/SPY_1hour_test.csv",
+# 合并
+join_csv_on_timestamp ("factoredData/SPY_30minute_test_factored.csv",
+                       "aggregatedData/SPY_10minute_test_agg_30min.csv",
+                       output_file="readyData/SPY_30minute_test.csv",
                        how='left')
 
-join_csv_on_timestamp ("factoredData/SPY_1hour_validate_factored.csv",
-                       "aggregatedData/SPY_15minute_validate_agg_1h.csv",
-                       output_file="readyData/SPY_1hour_validate.csv",
+join_csv_on_timestamp ("factoredData/SPY_30minute_validate_factored.csv",
+                       "aggregatedData/SPY_10minute_validate_agg_30min.csv",
+                       output_file="readyData/SPY_30minute_validate.csv",
                        how='left')
 
-join_csv_on_timestamp ("factoredData/SPY_1hour_train_factored.csv",
-                       "aggregatedData/SPY_15minute_train_agg_1h.csv", output_file="readyData/SPY_1hour_train.csv",
+join_csv_on_timestamp ("factoredData/SPY_30minute_train_factored.csv",
+                       "aggregatedData/SPY_10minute_train_agg_30min.csv", output_file="readyData/SPY_30minute_train.csv",
                        how='left')
 
-# df1 = pd.read_csv("readyData/SPY_1hour_validate.csv")
-# df2 = pd.read_csv("readyData/SPY_1hour_test.csv")
-# df3 = pd.read_csv("readyData/SPY_1hour_train.csv")
-#
-# columns = ['open_label', 'high_label', 'low_label', 'close_label']
-# df1[columns] = df1[columns].replace(-1, 0)
-# df2[columns] = df2[columns].replace(-1, 0)
-# df3[columns] = df3[columns].replace(-1, 0)
-#
-#
-# df1.to_csv("SPY_1hour_validate.csv", index=False)
-# df2.to_csv("SPY_1hour_test.csv", index=False)
-# df3.to_csv("SPY_1hour_train.csv", index=False)
+
+# df = pd.read_csv("readyData/SPY_1hour_test.csv")
+# print(df.shape)

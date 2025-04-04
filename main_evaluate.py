@@ -104,7 +104,7 @@ import joblib
 
 from TransformerModel import TimeSeriesTransformer
 from TransformerModel_classify import TimeSeriesTransformer_classify
-from Util import create_sequences, safeLoadCSV, plot_metric
+from Util import create_sequences, safeLoadCSV, plot_metric, plot_multiple_curves
 
 
 def evaluate_model_regression_main(test_csv, model_path, scaler_path, batch_size=32, seq_length=32,
@@ -141,9 +141,11 @@ def evaluate_model_regression_main(test_csv, model_path, scaler_path, batch_size
     print("测试集 MSE: ", mse_list)
     print("测试集 R²: ", r2_list)
 
-    # 绘制验证指标（可选）
-    plot_metric(mse_list[:, 0], y_label="mse", title="Test MSE", color='green')
-    plot_metric(r2_list[:, 0], y_label="r2", title="Test R²", color='blue')
+
+    curve_dict = {}
+    curve_dict['predicts'] = preds[:, 3]
+    curve_dict['targets'] = targets[:, 3]
+    plot_multiple_curves(curve_dict, x_label= 'Price', y_label= 'period')
 
 
 def evaluate_model_classification_main(test_csv, model_path, batch_size=32, seq_length=32,
@@ -179,8 +181,7 @@ def evaluate_model_classification_main(test_csv, model_path, batch_size=32, seq_
     # 使用分类评估函数，返回准确率
     accuracy = model.evaluate_model(test_dataset, batch_size=batch_size)
     print("测试集准确率: {:.4f}".format(accuracy))
-    # 绘制准确率曲线（可选）
-    plot_metric([accuracy], y_label="accuracy", title="Test Accuracy", color='blue')
+
 
 
 if __name__ == "__main__":

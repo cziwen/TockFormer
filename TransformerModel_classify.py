@@ -126,7 +126,7 @@ class TimeSeriesTransformer_classify(nn.Module):
 
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         # 修改损失函数：使用交叉熵损失（目标标签应为类别索引）
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.BCEWithLogitsLoss
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=1e-5)
 
         train_losses = []

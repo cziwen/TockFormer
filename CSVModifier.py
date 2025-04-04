@@ -50,30 +50,101 @@ def calculate_stochastic (df, period=14, smooth_k=3, signal=5):
     return k_smooth, d
 
 
+def calculate_roc (prices, period=14):
+    """
+    计算价格的变化率（Rate of Change），单位为百分比
+    """
+    prices_series = pd.Series (prices)
+    roc = (prices_series - prices_series.shift (period)) / prices_series.shift (period) * 100
+    return roc.values
+
+
+def calculate_volume_roc (volume, period=14):
+    """
+    计算成交量的变化率
+    """
+    volume_series = pd.Series (volume)
+    roc = (volume_series - volume_series.shift (period)) / volume_series.shift (period) * 100
+    return roc.values
+
+
+def calculate_obv (df):
+    """
+    计算能量潮指标（On Balance Volume, OBV）
+    OBV 的计算方法：
+      - 如果当日收盘价 > 前一日收盘价，则 OBV 加上当日成交量
+      - 如果当日收盘价 < 前一日收盘价，则 OBV 减去当日成交量
+      - 如果相等，则 OBV 不变
+    """
+    obv = [0]
+    for i in range (1, len (df)):
+        if df['close'].iloc[i] > df['close'].iloc[i - 1]:
+            obv.append (obv[-1] + df['volume'].iloc[i])
+        elif df['close'].iloc[i] < df['close'].iloc[i - 1]:
+            obv.append (obv[-1] - df['volume'].iloc[i])
+        else:
+            obv.append (obv[-1])
+    return np.array (obv)
+
+
 def add_factors_to_csv (csv_path, output_dir="factoredData"):
     '''
-    添加根据 open high low close 来添加 各种因子（rsi，macd，stoch_kd）
+    添加趋势、动量、成交量三类因子到 CSV 文件中
 
-    :param csv_path:
-    :param output_dir:
-    :return: 保存到路径新的csv
+    趋势指标：
+      - 对 open/high/low/close 分别计算简单移动均线 (SMA5, SMA10, SMA20)
+      - 以及指数移动均线 (EMA5, EMA10, EMA20)
+
+    动量指标：
+      - 计算 RSI、MACD（及其 signal 与 histogram）、Stochastic 指标，以及价格 ROC
+
+    成交量指标：
+      - 对 volume 计算 SMA5, SMA10
+      - 计算成交量 ROC
+      - 计算 OBV（需要 close 与 volume）
+
+    :param csv_path: 原始 CSV 文件路径，要求包含至少 open, high, low, close, volume 列
+    :param output_dir: 输出目录，默认为 "factoredData"
+    :return: 将新增因子后的 CSV 保存到 output_dir
     '''
     df = pd.read_csv (csv_path)
 
+    # 趋势指标 - 对价格计算移动均线（SMA 和 EMA）
+    for col in ['open', 'high', 'low', 'close']:
+        if col in df.columns:
+            # SMA
+            # df[f'SMA5_{col}'] = df[col].rolling(window=5).mean()
+            # df[f'SMA10_{col}'] = df[col].rolling(window=10).mean()
+            # df[f'SMA20_{col}'] = df[col].rolling(window=20).mean()
+            # EMA（采用 pandas 内置 ewm 方法）
+            df[f'EMA5_{col}'] = df[col].ewm (span=5, adjust=False).mean ()
+            df[f'EMA10_{col}'] = df[col].ewm (span=10, adjust=False).mean ()
+            df[f'EMA20_{col}'] = df[col].ewm (span=20, adjust=False).mean ()
+
+    # 动量指标 - 对价格计算 RSI, MACD, Stochastic, ROC
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[f'RSI_{col}'] = calculate_rsi (df[col].values, period=14)
-            macd, signal_line, hist = calculate_macd (df[col].values)
+            macd, signal_line, hist = calculate_macd (df[col].values, short=5, long=13, signal=9)
             df[f'MACD_value_{col}'] = macd
             df[f'MACD_signal_{col}'] = signal_line
             df[f'MACD_histogram_{col}'] = hist
+            df[f'ROC_{col}'] = calculate_roc (df[col].values, period=14)
 
     if all (col in df.columns for col in ['high', 'low', 'close']):
         k, d = calculate_stochastic (df)
         df['Stoch_K'] = k
         df['Stoch_D'] = d
 
-    # === 输出路径 ===
+    # 成交量指标
+    if 'volume' in df.columns:
+        df['Volume_SMA5'] = df['volume'].rolling (window=5).mean ()
+        df['Volume_SMA10'] = df['volume'].rolling (window=10).mean ()
+        df['Volume_ROC'] = calculate_volume_roc (df['volume'].values, period=14)
+        if 'close' in df.columns:
+            df['OBV'] = calculate_obv (df)
+
+    # 输出新的 CSV 文件
     filename = os.path.basename (csv_path).replace (".csv", "_factored.csv")
     os.makedirs (output_dir, exist_ok=True)
     output_path = os.path.join (output_dir, filename)
@@ -81,7 +152,7 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
     print (f"✔️ Factors added and saved to {output_path}")
 
 
-def clean_price_outliers (df, columns=None, z_thresh=5):
+def clean_outliers (df, columns=None, z_thresh=5):
     """
     清洗 DataFrame 中价格类或数值类字段的异常值：
     - 若未指定 columns，则自动选择所有数值列
@@ -163,20 +234,6 @@ def aggregate_high_freq_to_low (df, freq='1h'):
         'volume': 'volume_volatility'
     }, inplace=True)
 
-    # 重新计算额外趋势性因子（用原始数据做 resample）
-    df_extras = df.resample (freq).agg ({
-        'high': 'max',
-        'low': 'min',
-        'open': 'first',
-        'close': 'last'
-    })
-
-    # 衍生趋势因子
-    df_agg['price_range'] = df_extras['high'] - df_extras['low']
-    df_agg['body_size'] = (df_extras['close'] - df_extras['open']).abs ()
-    # df_agg['direction'] = np.sign (df_extras['close'] - df_extras['open'])
-    df_agg['return_pct'] = (df_extras['close'] - df_extras['open']) / df_extras['open']
-
     df_agg.reset_index (inplace=True)
     return df_agg
 
@@ -189,13 +246,13 @@ def process_high_freq_to_low (csv_path, output_dir="aggregatedData", freq='1h'):
     df = pd.read_csv (csv_path)
 
     print ("\n清洗 open high low close 异常值:")
-    df = clean_price_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
+    df = clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
 
     # 聚合为低频
     df_low = aggregate_high_freq_to_low (df, freq=freq)
 
-    print ("\n清洗 全部feature 异常值:")
-    df_low = clean_price_outliers (df_low, z_thresh=10)
+    print ("\n清洗 open high low close 异常值, Drop 空 行:")
+    df_low = clean_outliers (df_low, columns=['open', 'high', 'low', 'close'], z_thresh=10)
 
     # 保存文件
     filename = os.path.basename (csv_path).replace (".csv", f"_agg_{freq}.csv")
@@ -210,37 +267,78 @@ def join_csv_on_timestamp (csv1, csv2, output_file, how='inner'):
     df2 = pd.read_csv (csv2, parse_dates=['timestamp'])
 
     df_merged = pd.merge (df1, df2, on='timestamp', how=how)
+
+    clean_outliers (df_merged, columns=['open', 'high', 'low', 'close'], z_thresh=10)
+
     df_merged.to_csv (output_file, index=False)
     print (f"✅ Join complete. Saved to {output_file} ({len (df_merged)} rows)")
 
 
+def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
+    """
+    读取一个 CSV 文件，并在其后面添加新的数据特征，
+    每个新特征表示对应列与前一行数据比较的涨跌情况：
+      - 上涨为 1
+      - 下跌为 -1
+      - 持平为 0
 
+    参数：
+      - input_csv: 输入 CSV 文件路径
+      - output_csv: 输出 CSV 文件路径（保存添加新特征后的数据）
+      - feature_list: 需要生成涨跌标签的列名列表，如 ['open', 'high', 'low', 'close']
+
+    返回：
+      - None
+    """
+    # 读取 CSV 数据
+    df = pd.read_csv (input_csv)
+
+    # 遍历每个指定的特征，计算与前一行的差值并生成涨跌标签
+    for feature in feature_list:
+        # diff() 计算当前行与前一行的差值
+        diff = df[feature].diff ()
+        # 根据差值判断涨跌：
+        # 大于 0 为 1， 小于 0 为 -1， 等于 0 为 0
+        # 首行因为无前一行，diff 得到 NaN，统一填充为 0
+        df[f'{feature}_label'] = diff.apply (lambda x: 1 if x > 0 else (-1 if x < 0 else 0)).fillna (0)
+
+    # 将更新后的 DataFrame 写入新的 CSV 文件
+    df.to_csv (output_csv, index=False)
+    print (f"已生成新的 CSV 文件：{output_csv}")
+
+
+process_high_freq_to_low ("rawdata/SPY_15minute_test.csv", freq='1h')
+process_high_freq_to_low ("rawdata/SPY_15minute_validate.csv", freq='1h')
+process_high_freq_to_low ("rawdata/SPY_15minute_train.csv", freq='1h')
+
+add_factors_to_csv ("rawData/SPY_1hour_test.csv")
+add_factors_to_csv ("rawData/SPY_1hour_train.csv")
+add_factors_to_csv ("rawData/SPY_1hour_validate.csv")
+
+join_csv_on_timestamp ("factoredData/SPY_1hour_test_factored.csv",
+                       "aggregatedData/SPY_15minute_test_agg_1h.csv",
+                       output_file="readyData/SPY_1hour_test.csv",
+                       how='left')
+
+join_csv_on_timestamp ("factoredData/SPY_1hour_validate_factored.csv",
+                       "aggregatedData/SPY_15minute_validate_agg_1h.csv",
+                       output_file="readyData/SPY_1hour_validate.csv",
+                       how='left')
+
+join_csv_on_timestamp ("factoredData/SPY_1hour_train_factored.csv",
+                       "aggregatedData/SPY_15minute_train_agg_1h.csv", output_file="readyData/SPY_1hour_train.csv",
+                       how='left')
+
+# df1 = pd.read_csv("readyData/SPY_1hour_validate.csv")
+# df2 = pd.read_csv("readyData/SPY_1hour_test.csv")
+# df3 = pd.read_csv("readyData/SPY_1hour_train.csv")
 #
-# process_high_freq_to_low ("rawdata/SPY_1minute_test.csv", freq='5min')
-# process_high_freq_to_low ("rawdata/SPY_5minute_test.csv", freq='30min')
-# process_high_freq_to_low ("rawdata/SPY_15minute_test.csv", freq='1h')
+# columns = ['open_label', 'high_label', 'low_label', 'close_label']
+# df1[columns] = df1[columns].replace(-1, 0)
+# df2[columns] = df2[columns].replace(-1, 0)
+# df3[columns] = df3[columns].replace(-1, 0)
 #
 #
-#
-# add_factors_to_csv('rawdata/SPY_1hour_test.csv')
-# add_factors_to_csv('rawdata/SPY_30minute_test.csv')
-# add_factors_to_csv('rawdata/SPY_5minute_test.csv')
-
-
-
-
-
-# join_csv_on_timestamp ("factoredData/SPY_1hour_test_factored.csv", "aggregatedData/SPY_15minute_test_agg_1h.csv",
-#                        "readyData/SPY_1hour_test_f.csv",
-#                        how='inner')
-#
-# join_csv_on_timestamp ("factoredData/SPY_30minute_test_factored.csv", "aggregatedData/SPY_5minute_test_agg_30min.csv",
-#                        "readyData/SPY_30min_test_f.csv",
-#                        how='inner')
-#
-# join_csv_on_timestamp ("factoredData/SPY_5minute_test_factored.csv", "aggregatedData/SPY_1minute_test_agg_5min.csv",
-#                        "readyData/SPY_5min_test_f.csv",
-#                        how='inner')
-
-# df = pd.read_csv ('readyData/SPY_1hour_test_f.csv')
-# print(df.shape)
+# df1.to_csv("SPY_1hour_validate.csv", index=False)
+# df2.to_csv("SPY_1hour_test.csv", index=False)
+# df3.to_csv("SPY_1hour_train.csv", index=False)

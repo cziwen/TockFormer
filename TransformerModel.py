@@ -156,7 +156,7 @@ class TimeSeriesTransformer(nn.Module):
 
     def train_model(self, train_dataset, val_dataset=None, num_epochs=30, batch_size=32,
                     learning_rate=1e-4, scaler=None, target_indices=None, patience=5,
-                    min_delta=0.0, monitor_target=0):
+                    min_delta=1e-5):
         """
         训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping。
         同时检测 GPU 是否可用，并将模型和数据迁移到相应设备上。
@@ -209,9 +209,9 @@ class TimeSeriesTransformer(nn.Module):
                 val_mse_lists.append(mse_list)
                 val_r2_lists.append(r2_list)
 
-                monitored_mse = mse_list[monitor_target]
-                if monitored_mse + min_delta < best_val_mse:
-                    best_val_mse = monitored_mse
+                avg_mse = np.mean(mse_list)
+                if avg_mse + min_delta < best_val_mse:
+                    best_val_mse = avg_mse
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1

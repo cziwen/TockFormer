@@ -132,7 +132,9 @@ def evaluate_model_regression_main(test_csv, model_path, scaler_path, batch_size
         seq_length=seq_length,
         output_dim=output_dim
     )
-    model.load_state_dict(torch.load(model_path))
+
+    device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     # 使用回归评估函数，返回 MSE、R² 等指标
@@ -145,7 +147,7 @@ def evaluate_model_regression_main(test_csv, model_path, scaler_path, batch_size
     curve_dict = {}
     curve_dict['predicts'] = preds[:, 3]
     curve_dict['targets'] = targets[:, 3]
-    plot_multiple_curves(curve_dict, x_label= 'Price', y_label= 'period')
+    plot_multiple_curves(curve_dict, x_label= 'interval', y_label= 'price')
 
 
 def evaluate_model_classification_main(test_csv, model_path, batch_size=32, seq_length=32,
@@ -175,8 +177,10 @@ def evaluate_model_classification_main(test_csv, model_path, batch_size=32, seq_
         seq_length=seq_length,
         output_dim=output_dim  # output_dim 表示类别数
     )
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
+
+    device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
+    model.load_state_dict (torch.load (model_path, map_location=device))
+    model.eval ()
 
     # 使用分类评估函数，返回准确率
     accuracy = model.evaluate_model(test_dataset, batch_size=batch_size)

@@ -26,6 +26,7 @@ distro==1.9.0
 executing==2.2.0
 fastjsonschema==2.21.1
 filelock==3.16.1
+finnhub-python==2.4.23
 fire==0.7.0
 fonttools==4.56.0
 fqdn==1.5.1
@@ -36,7 +37,7 @@ httpx==0.28.1
 huggingface-hub==0.27.0
 idna==3.10
 ipykernel==6.29.5
-ipython>=8.10.0
+ipython==9.0.2
 ipython_pygments_lexers==1.1.1
 isoduration==20.11.0
 jedi==0.19.2

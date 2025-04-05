@@ -332,6 +332,7 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
 #                        "aggregatedData/SPY_10minute_train_agg_30min.csv", output_file="readyData/SPY_30minute_train.csv",
 #                        how='left')
 
+df = pd.read_csv("readyData/SPY_5minute_test.csv")
+df = df.drop(columns=['num_transactions'])
 
-df = pd.read_csv("readyData/SPY_1hour_test.csv")
-print(df.shape)
+df.to_csv("readyData/SPY_5minute_test_noN.csv", index=False)

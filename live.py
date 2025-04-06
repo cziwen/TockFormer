@@ -54,7 +54,7 @@ def fetch_data (symbol, interval='5min', num_bars=50):
         'resolution': resolution,
         'from': start_time,
         'to': end_time,
-        # 'token': 'cvop3lhr01qihjtq3uvgcv叽里呱啦op3lhr01qihjtq3v00'  # 替换为你的 AP-I K-ey
+        'token': 'cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00'  # 替换为你的 AP-I K-ey
     }
 
     response = requests.get (url, params=params)

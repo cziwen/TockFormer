@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
+import copy
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -171,27 +172,105 @@ class TimeSeriesTransformer (nn.Module):
 
         return mse_list, r2_list, preds, targets
 
+    # def train_model (self, train_dataset, val_dataset=None, num_epochs=50, batch_size=32,
+    #                  learning_rate=1e-4, scaler=None, target_indices=None, patience=5,
+    #                  min_delta=1e-5):
+    #     """
+    #     训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping。
+    #     同时检测 GPU 是否可用，并将模型和数据迁移到相应设备上。
+    #
+    #     返回：
+    #       - train_losses: 每个 epoch 的训练损失
+    #       - val_mse_lists: 每个 epoch 的验证 MSE 列表
+    #       - val_r2_lists: 每个 epoch 的验证 R² 列表
+    #     """
+    #     # 检测是否有 GPU，并打印使用设备
+    #     device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
+    #     print (f"Using device: {device}")
+    #     self.to (device)
+    #
+    #     best_val_mse = float ('inf')
+    #     epochs_no_improve = 0
+    #     early_stop = False
+    #
+    #     train_loader = DataLoader (train_dataset, batch_size=batch_size, shuffle=True)
+    #     criterion = nn.MSELoss ()
+    #     optimizer = torch.optim.Adam (self.parameters (), lr=learning_rate, weight_decay=1e-5)
+    #
+    #     train_losses = []
+    #     val_mse_lists = []
+    #     val_r2_lists = []
+    #
+    #     for epoch in range (num_epochs):
+    #         self.train ()
+    #         total_loss = 0.0
+    #
+    #         for batch_inputs, batch_targets in train_loader:
+    #             # shuffle train_loader ！根据 step，存储模型当前最好的指标，视情况 shuffle。如果 worse performance 的count 大与 thresh，则 shuffle
+    #
+    #             # 将数据迁移到设备
+    #             batch_inputs = batch_inputs.to (device)
+    #             batch_targets = batch_targets.to (device)
+    #
+    #             optimizer.zero_grad ()
+    #             outputs = self (batch_inputs)
+    #             loss = criterion (outputs, batch_targets)
+    #             loss.backward ()
+    #             optimizer.step ()
+    #             total_loss += loss.item ()
+    #
+    #         avg_loss = total_loss / len (train_loader)
+    #         train_losses.append (avg_loss)
+    #         print (f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_loss:.6f}")
+    #
+    #         if val_dataset is not None:
+    #             mse_list, r2_list, _, _ = self.evaluate_model (val_dataset, batch_size=batch_size,
+    #                                                            scaler=scaler, target_indices=target_indices)
+    #             val_mse_lists.append (mse_list)
+    #             val_r2_lists.append (r2_list)
+    #
+    #             avg_mse = np.mean (mse_list)
+    #             if avg_mse + min_delta < best_val_mse:  # 如果训练到最好的模型，保存下来。
+    #                 best_val_mse = avg_mse
+    #                 epochs_no_improve = 0
+    #             else:
+    #                 epochs_no_improve += 1
+    #                 if epochs_no_improve >= patience:
+    #                     print (f"Early stopping at epoch {epoch + 1}")
+    #                     early_stop = True
+    #                     break
+    #
+    #             print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
+    #
+    #     if not early_stop:  # 回溯到最佳的模型存档
+    #         print ("Training finished without early stopping.")
+    #
+    #     return train_losses, val_mse_lists, val_r2_lists
     def train_model (self, train_dataset, val_dataset=None, num_epochs=50, batch_size=32,
                      learning_rate=1e-4, scaler=None, target_indices=None, patience=5,
-                     min_delta=1e-5):
+                     min_delta=1e-6, batch_shuffle_threshold=10):
         """
-        训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping。
-        同时检测 GPU 是否可用，并将模型和数据迁移到相应设备上。
+        训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping 以及中间的训练数据重新打乱策略。
+        如果在验证集上连续 patience 个 epoch 没有取得更好的性能，则回溯到上次表现最好的模型参数。
+        同时，在每个 epoch 内部，对每个训练 batch 计算 loss，
+        如果连续 batch 数超过 batch_shuffle_threshold 都没有得到更优的 loss，则重新打乱训练数据继续训练。
 
         返回：
           - train_losses: 每个 epoch 的训练损失
           - val_mse_lists: 每个 epoch 的验证 MSE 列表
           - val_r2_lists: 每个 epoch 的验证 R² 列表
         """
-        # 检测是否有 GPU，并打印使用设备
+
         device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
         print (f"Using device: {device}")
         self.to (device)
 
         best_val_mse = float ('inf')
+        best_model_state = None  # 保存表现最好的模型参数
         epochs_no_improve = 0
         early_stop = False
 
+        # 初始的训练 DataLoader（shuffle=True，每个 epoch 会重新打乱，但这里还加了内部打乱逻辑）
         train_loader = DataLoader (train_dataset, batch_size=batch_size, shuffle=True)
         criterion = nn.MSELoss ()
         optimizer = torch.optim.Adam (self.parameters (), lr=learning_rate, weight_decay=1e-5)
@@ -204,10 +283,22 @@ class TimeSeriesTransformer (nn.Module):
             self.train ()
             total_loss = 0.0
 
-            for batch_inputs, batch_targets in train_loader:
-                # shuffle train_loader ！根据 step，存储模型当前最好的指标，视情况 shuffle。如果 worse performance 的count 大与 thresh，则 shuffle
+            # 新增：在每个 epoch 内记录连续没有改进的 batch 数量
+            bad_batch_count = 0
+            best_batch_loss = float ('inf')
 
-                # 将数据迁移到设备
+            # 为了支持中途重新打乱训练数据，使用 while 循环迭代 train_loader
+            # 将 train_loader 转换为 iterator
+            batch_iterator = iter (train_loader)
+            num_batches = len (train_loader)
+            batch_idx = 0
+
+            while batch_idx < num_batches:
+                try:
+                    batch_inputs, batch_targets = next (batch_iterator)
+                except StopIteration:
+                    break
+
                 batch_inputs = batch_inputs.to (device)
                 batch_targets = batch_targets.to (device)
 
@@ -216,9 +307,31 @@ class TimeSeriesTransformer (nn.Module):
                 loss = criterion (outputs, batch_targets)
                 loss.backward ()
                 optimizer.step ()
-                total_loss += loss.item ()
 
-            avg_loss = total_loss / len (train_loader)
+                batch_loss = loss.item ()
+                total_loss += batch_loss
+
+                # 更新当前 epoch 内的最佳 batch loss 和计数连续差的 batch 数
+                if batch_loss < best_batch_loss - min_delta:
+                    best_batch_loss = batch_loss
+                    bad_batch_count = 0
+                else:
+                    bad_batch_count += 1
+
+                # 如果连续 bad batch 超过阈值，则重新打乱训练数据（内部策略，不做模型回溯）
+                if bad_batch_count >= batch_shuffle_threshold:
+                    print (
+                        f"Epoch {epoch + 1}: Bad batch threshold reached at batch {batch_idx + 1}. Reshuffling training data.")
+                    # 重新创建 train_loader
+                    train_loader = DataLoader (train_dataset, batch_size=batch_size, shuffle=True)
+                    batch_iterator = iter (train_loader)
+                    num_batches = len (train_loader)
+                    bad_batch_count = 0  # 重置计数
+                    # 注意：这里不会回溯模型参数，只是换个顺序继续训练
+                    # 如果需要对模型参数进行回溯，请使用 early stopping 保存的模型
+                batch_idx += 1
+
+            avg_loss = total_loss / num_batches
             train_losses.append (avg_loss)
             print (f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_loss:.6f}")
 
@@ -228,20 +341,24 @@ class TimeSeriesTransformer (nn.Module):
                 val_mse_lists.append (mse_list)
                 val_r2_lists.append (r2_list)
 
-                avg_mse = np.mean (mse_list)
-                if avg_mse + min_delta < best_val_mse:  # 如果训练到最好的模型，保存下来。
-                    best_val_mse = avg_mse
+                best_avg_mse = np.mean (mse_list)
+                print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
+
+                # 如果当前验证指标比之前更好，则保存模型参数
+                if best_avg_mse + min_delta < best_val_mse:
+                    best_val_mse = best_avg_mse
                     epochs_no_improve = 0
+                    best_model_state = copy.deepcopy (self.state_dict ())  # 保存最佳模型参数
                 else:
                     epochs_no_improve += 1
                     if epochs_no_improve >= patience:
-                        print (f"Early stopping at epoch {epoch + 1}")
+                        print (f"Early stopping triggered at epoch {epoch + 1}. Reverting to best model parameters.")
                         early_stop = True
+                        # 回溯至最佳模型参数
+                        self.load_state_dict (best_model_state)
                         break
 
-                print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
-
-        if not early_stop:  # 回溯到最佳的模型存档
+        if not early_stop:
             print ("Training finished without early stopping.")
 
         return train_losses, val_mse_lists, val_r2_lists

@@ -221,6 +221,7 @@ if __name__ == "__main__":
             test_csv=args.test,
             model_path=args.model,
             scaler_path=args.scaler,
+            bias_corrector_path=args.bias_corrector,
             batch_size=args.batch_size,
             seq_length=args.sequential_length,
             input_dim=args.input_dim,

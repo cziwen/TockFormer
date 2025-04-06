@@ -117,7 +117,7 @@ from TransformerModel_classify import TimeSeriesTransformer_classify
 from Util import create_sequences, safeLoadCSV, plot_metric
 
 
-def train_model_main (train_csv, val_csv, model_out, scaler_out, batch_size=32, seq_length=32,
+def train_model_main (train_csv, val_csv, model_out, scaler_out, bias_corrector_out, batch_size=32, seq_length=32,
                       input_dim=33, model_dim=64, num_heads=4, num_layers=2,
                       output_dim=4, dropout=0.2, epochs=30, lr=1e-4, patience=5):
     """
@@ -150,7 +150,7 @@ def train_model_main (train_csv, val_csv, model_out, scaler_out, batch_size=32, 
     val_dataset = TensorDataset (x_val, y_val)
 
     print ("=" * 10 + " 开始训练模型... " + "=" * 10)
-    train_loss, mse_list, r2_list = model.train_model (
+    train_loss, mse_list, r2_list, bias_corrector = model.train_model (
         train_dataset,
         val_dataset=val_dataset,
         num_epochs=epochs,
@@ -164,10 +164,12 @@ def train_model_main (train_csv, val_csv, model_out, scaler_out, batch_size=32, 
     # 创建保存目录
     os.makedirs (os.path.dirname (model_out), exist_ok=True)
     os.makedirs (os.path.dirname (scaler_out), exist_ok=True)
+    os.makedirs (os.path.dirname (bias_corrector_out), exist_ok=True)
 
-    print ("=" * 10 + " 保存模型和Scaler... " + "=" * 10)
+    print ("=" * 10 + " 保存模型, Scaler, Corrector... " + "=" * 10)
     torch.save (model.state_dict (), model_out)
     joblib.dump (scaler_train, scaler_out)
+    bias_corrector.save (bias_corrector_out)
 
     print ("=" * 10 + " 绘图中... " + "=" * 10)
     mse_list = np.array (mse_list)
@@ -246,6 +248,7 @@ if __name__ == "__main__":
     parser.add_argument ("--train", type=str, required=True, help="训练数据 CSV 路径")
     parser.add_argument ("--val", type=str, required=True, help="验证数据 CSV 路径")
     parser.add_argument ("--model_out", type=str, required=True, help="保存模型路径")
+    parser.add_argument ("--bias_Corrector_out", type=str, help="保存bias corrector路径 (回归任务使用)")
     # 对于回归任务需要保存Scaler，分类任务不需要
     parser.add_argument ("--scaler_out", type=str, help="保存Scaler路径 (回归任务使用)")
     parser.add_argument ("--epochs", type=int, default=30, help="训练轮数")
@@ -271,6 +274,7 @@ if __name__ == "__main__":
             val_csv=args.val,
             model_out=args.model_out,
             scaler_out=args.scaler_out,
+            bias_corrector_out=args.bias_Corrector_out,
             batch_size=args.batch_size,
             epochs=args.epochs,
             lr=args.lr,

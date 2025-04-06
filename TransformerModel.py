@@ -5,6 +5,7 @@ import numpy as np
 import copy
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_squared_error, r2_score
+from BiasCorrector import *
 
 
 class PositionalEncoding (nn.Module):
@@ -87,7 +88,7 @@ class TimeSeriesTransformer (nn.Module):
         # )
 
         # Learnable scalar bias for each output dimension（静态）
-        self.learnable_bias = nn.Parameter (torch.zeros (output_dim))  # shape: [output_dim]
+        # self.learnable_bias = nn.Parameter (torch.zeros (output_dim))  # shape: [output_dim]
 
     def forward (self, src):
         """
@@ -118,7 +119,7 @@ class TimeSeriesTransformer (nn.Module):
         # out = bias_output + out
 
         # 添加静态偏移值
-        out = out + self.learnable_bias
+        # out = out + self.learnable_bias
 
         return out
 
@@ -131,7 +132,8 @@ class TimeSeriesTransformer (nn.Module):
             preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
         return preds_inv
 
-    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3]):
+    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3], fit=False,
+                        bias_corrector=None):
         """
         在验证集上评估模型，计算各目标特征的 MSE 和 R²，并返回逆缩放后的预测值和真实值
 
@@ -171,17 +173,27 @@ class TimeSeriesTransformer (nn.Module):
         preds = self.safe_inverse_transform (preds, scaler, target_indices)
         targets = self.safe_inverse_transform (targets, scaler, target_indices)
 
+        if fit:
+            # 验证阶段得到 preds 和 targets（经过 inverse transform 后）
+            bias_corrector = BiasCorrector (mode='linear')
+            bias_corrector.fit (preds, targets)
+        elif bias_corrector is not None:
+            # 测试阶段得到 preds（经过 inverse transform 后）
+            preds = bias_corrector.transform (preds)
+        else:
+            print ("没有使用 bias corrector")
+
         mse_list = []
         r2_list = []
         for i in range (preds.shape[1]):
             mse_list.append (mean_squared_error (targets[:, i], preds[:, i]))
             r2_list.append (r2_score (targets[:, i], preds[:, i]))
 
-        return mse_list, r2_list, preds, targets
+        return mse_list, r2_list, preds, targets, bias_corrector
 
     def train_model (self, train_dataset, val_dataset=None, num_epochs=50, batch_size=32,
                      learning_rate=1e-4, scaler=None, target_indices=None, patience=10,
-                     min_delta=1e-6, batch_shuffle_threshold=50):
+                     min_delta=1e-5, batch_shuffle_threshold=50):
         """
         训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping 以及中间的训练数据重新打乱策略。
         如果在验证集上连续 patience 个 epoch 没有取得更好的性能，则回溯到上次表现最好的模型参数。
@@ -200,6 +212,7 @@ class TimeSeriesTransformer (nn.Module):
 
         best_val_mse = float ('inf')
         best_model_state = None  # 保存表现最好的模型参数
+        best_bias_corrector = None  # 跟模型保存最好的corrector
         epochs_no_improve = 0
         early_stop = False
 
@@ -269,8 +282,10 @@ class TimeSeriesTransformer (nn.Module):
             print (f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_loss:.6f}")
 
             if val_dataset is not None:
-                mse_list, r2_list, _, _ = self.evaluate_model (val_dataset, batch_size=batch_size,
-                                                               scaler=scaler, target_indices=target_indices)
+                mse_list, r2_list, _, _, bias_corrector = self.evaluate_model (val_dataset, batch_size=batch_size,
+                                                                               scaler=scaler,
+                                                                               target_indices=target_indices,
+                                                                               fit=True)
                 val_mse_lists.append (mse_list)
                 val_r2_lists.append (r2_list)
 
@@ -282,6 +297,7 @@ class TimeSeriesTransformer (nn.Module):
                     best_val_mse = best_avg_mse
                     epochs_no_improve = 0
                     best_model_state = copy.deepcopy (self.state_dict ())  # 保存最佳模型参数
+                    best_bias_corrector = bias_corrector
                 else:
                     epochs_no_improve += 1
                     if epochs_no_improve >= patience:
@@ -294,7 +310,7 @@ class TimeSeriesTransformer (nn.Module):
         if not early_stop:
             print ("Training finished without early stopping.")
 
-        return train_losses, val_mse_lists, val_r2_lists
+        return train_losses, val_mse_lists, val_r2_lists, best_bias_corrector
 
 
 # ===== 测试部分 =====

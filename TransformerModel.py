@@ -86,6 +86,9 @@ class TimeSeriesTransformer (nn.Module):
         #     nn.Linear (32, output_dim)
         # )
 
+        # Learnable scalar bias for each output dimension（静态）
+        self.learnable_bias = nn.Parameter (torch.zeros (output_dim))  # shape: [output_dim]
+
     def forward (self, src):
         """
         前向传播
@@ -113,6 +116,9 @@ class TimeSeriesTransformer (nn.Module):
         # bias_output = self.residual_bias (x_last)  # shape: [batch_size, output_dim]
         #
         # out = bias_output + out
+
+        # 添加静态偏移值
+        out = out + self.learnable_bias
 
         return out
 

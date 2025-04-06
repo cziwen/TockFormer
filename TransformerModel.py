@@ -247,8 +247,8 @@ class TimeSeriesTransformer (nn.Module):
     #
     #     return train_losses, val_mse_lists, val_r2_lists
     def train_model (self, train_dataset, val_dataset=None, num_epochs=50, batch_size=32,
-                     learning_rate=1e-4, scaler=None, target_indices=None, patience=5,
-                     min_delta=1e-6, batch_shuffle_threshold=10):
+                     learning_rate=1e-4, scaler=None, target_indices=None, patience=10,
+                     min_delta=1e-6, batch_shuffle_threshold=200):
         """
         训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping 以及中间的训练数据重新打乱策略。
         如果在验证集上连续 patience 个 epoch 没有取得更好的性能，则回溯到上次表现最好的模型参数。

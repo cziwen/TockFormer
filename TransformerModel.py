@@ -80,11 +80,11 @@ class TimeSeriesTransformer (nn.Module):
         # -------------------------------
         # 残差偏移模块（Residual Bias Module）
         # 根据最后一个时间步的隐藏状态计算一个动态偏移值，
-        self.residual_bias = nn.Sequential (
-            nn.Linear (model_dim, 32),
-            nn.ReLU (),
-            nn.Linear (32, output_dim)
-        )
+        # self.residual_bias = nn.Sequential (
+        #     nn.Linear (model_dim, 32),
+        #     nn.ReLU (),
+        #     nn.Linear (32, output_dim)
+        # )
 
     def forward (self, src):
         """
@@ -108,10 +108,11 @@ class TimeSeriesTransformer (nn.Module):
         # 采用最后一个时间步作为整体序列表示
         x_last = encoder_output[:, -1, :]
         out = self.output_regressor (x_last)
-        # 计算动态偏移值
-        bias_output = self.residual_bias (x_last)  # shape: [batch_size, output_dim]
 
-        out = bias_output + out
+        # 计算动态偏移值
+        # bias_output = self.residual_bias (x_last)  # shape: [batch_size, output_dim]
+        #
+        # out = bias_output + out
 
         return out
 

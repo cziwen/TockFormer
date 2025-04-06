@@ -108,6 +108,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.utils import shuffle
 from torch.utils.data import TensorDataset
 import joblib
 

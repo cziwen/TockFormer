@@ -4,7 +4,7 @@ import json
 import sys
 
 # 替换成你的真实 API key
-API_KEY = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
+# API_KEY = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
 
 
 def on_message(ws, message):

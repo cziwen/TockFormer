@@ -87,41 +87,24 @@ def calculate_obv (df):
     return np.array (obv)
 
 
-def add_factors_to_csv (csv_path, output_dir="factoredData"):
-    '''
-    添加趋势、动量、成交量三类因子到 CSV 文件中
-
-    趋势指标：
-      - 对 open/high/low/close 分别计算简单移动均线 (SMA5, SMA10, SMA20)
-      - 以及指数移动均线 (EMA5, EMA10, EMA20)
-
-    动量指标：
-      - 计算 RSI、MACD（及其 signal 与 histogram）、Stochastic 指标，以及价格 ROC
-
-    成交量指标：
-      - 对 volume 计算 SMA5, SMA10
-      - 计算成交量 ROC
-      - 计算 OBV（需要 close 与 volume）
-
-    :param csv_path: 原始 CSV 文件路径，要求包含至少 open, high, low, close, volume 列
-    :param output_dir: 输出目录，默认为 "factoredData"
-    :return: 将新增因子后的 CSV 保存到 output_dir
-    '''
-    df = pd.read_csv (csv_path)
-
-    # 趋势指标 - 对价格计算移动均线（SMA 和 EMA）
+def add_factors (df):
+    """
+    给传入的 DataFrame 添加因子：
+      - 趋势指标：对 open/high/low/close 计算 EMA5, EMA10, EMA20
+      - 动量指标：RSI、MACD（value, signal, histogram）、ROC，以及 Stochastic 指标
+      - 成交量指标：Volume SMA5, Volume SMA10, Volume ROC 和 OBV
+      - 新增 VWAP：基于 (high+low+close)/3 和 volume 计算 VWAP
+    :param df: 包含至少 open, high, low, close, volume 列的 DataFrame
+    :return: 新增因子后的 DataFrame
+    """
+    # 趋势指标 - 对价格计算 EMA
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
-            # SMA
-            # df[f'SMA5_{col}'] = df[col].rolling(window=5).mean()
-            # df[f'SMA10_{col}'] = df[col].rolling(window=10).mean()
-            # df[f'SMA20_{col}'] = df[col].rolling(window=20).mean()
-            # EMA（采用 pandas 内置 ewm 方法）
             df[f'EMA5_{col}'] = df[col].ewm (span=5, adjust=False).mean ()
             df[f'EMA10_{col}'] = df[col].ewm (span=10, adjust=False).mean ()
             df[f'EMA20_{col}'] = df[col].ewm (span=20, adjust=False).mean ()
 
-    # 动量指标 - 对价格计算 RSI, MACD, Stochastic, ROC
+    # 动量指标 - 对价格计算 RSI, MACD, ROC
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[f'RSI_{col}'] = calculate_rsi (df[col].values, period=14)
@@ -144,12 +127,31 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
         if 'close' in df.columns:
             df['OBV'] = calculate_obv (df)
 
-    # 输出新的 CSV 文件
+    # VWAP 因子 （不包括 open）
+    if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        df['VWAP'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
+
+    return df
+
+
+def add_factors_to_csv (csv_path, output_dir="factoredData"):
+    """
+    读取 CSV 文件，添加因子后保存到指定目录。
+
+    :param csv_path: 原始 CSV 文件路径，要求包含至少 open, high, low, close, volume 列
+    :param output_dir: 输出目录，默认为 "factoredData"
+    :return: 保存后的 CSV 路径
+    """
+    df = pd.read_csv (csv_path)
+    df = add_factors (df)
+
     filename = os.path.basename (csv_path).replace (".csv", "_factored.csv")
     os.makedirs (output_dir, exist_ok=True)
     output_path = os.path.join (output_dir, filename)
     df.to_csv (output_path, index=False)
     print (f"✔️ Factors added and saved to {output_path}")
+    return output_path
 
 
 def clean_outliers (df, columns=None, z_thresh=5):
@@ -202,6 +204,7 @@ def clean_outliers (df, columns=None, z_thresh=5):
     # 统一删除含 NaN 的整行
     original_len = len (df)
     df.dropna (inplace=True)
+    df.reset_index (inplace=True, drop=True)
     dropped_rows = original_len - len (df)
 
     print (f"✅ 替换了 {total_replaced} 个异常值")
@@ -210,12 +213,17 @@ def clean_outliers (df, columns=None, z_thresh=5):
     return df
 
 
-def aggregate_high_freq_to_low (df, freq='1h'):
+def aggregate_high_freq_to_low (df, freq='1h', timestamp='timestamp'):
     """
     使用标准差等波动性指标替代原始价格信息，保留趋势性因子
     """
-    df['timestamp'] = pd.to_datetime (df['timestamp'])
-    df.set_index ('timestamp', inplace=True)
+
+    print ("\n清洗 open high low close 异常值, Drop 空 行 (1):")
+    df = df.copy()
+    df = clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
+
+    df[timestamp] = pd.to_datetime (df[timestamp])
+    df.set_index (timestamp, inplace=True)
 
     # 使用标准差来表示 open, high, low, close, volume 的波动性
     df_agg = df.resample (freq).agg ({
@@ -235,24 +243,22 @@ def aggregate_high_freq_to_low (df, freq='1h'):
     }, inplace=True)
 
     df_agg.reset_index (inplace=True)
+
+    print ("\n清洗 open high low close 异常值, Drop 空 行 (2):")
+    df_agg = clean_outliers (df_agg, columns=['open', 'high', 'low', 'close'], z_thresh=10)
+
     return df_agg
 
 
 def process_high_freq_to_low (csv_path, output_dir="aggregatedData", freq='1h'):
     """
-    读取高频 CSV，清洗异常值，聚合为低频数据，去除缺失行，并保存。
-    输出文件名示例：SPY_5minute_train_agg_1h.csv
+    读取高频 CSV，清洗异常值，聚合为低频数据，去除缺失行。
+    输出文件名示例：SPY_5minute_train_agg_1h.csv (如果保存)
     """
     df = pd.read_csv (csv_path)
 
-    print ("\n清洗 open high low close 异常值:")
-    df = clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
-
     # 聚合为低频
     df_low = aggregate_high_freq_to_low (df, freq=freq)
-
-    print ("\n清洗 open high low close 异常值, Drop 空 行:")
-    df_low = clean_outliers (df_low, columns=['open', 'high', 'low', 'close'], z_thresh=10)
 
     # 保存文件
     filename = os.path.basename (csv_path).replace (".csv", f"_agg_{freq}.csv")
@@ -305,7 +311,6 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
     # 将更新后的 DataFrame 写入新的 CSV 文件
     df.to_csv (output_csv, index=False)
     print (f"已生成新的 CSV 文件：{output_csv}")
-
 
 # # 把高频转换低频数据
 # process_high_freq_to_low ("rawdata/SPY_10minute_test.csv", freq='30min')

@@ -117,9 +117,10 @@ def evaluate_model_regression_main(test_csv, model_path, scaler_path, batch_size
     """
     print("=" * 10 + " 加载回归任务测试数据中... " + "=" * 10)
     test_df = pd.read_csv(test_csv)
+    scaler = joblib.load (scaler_path)
     # 注意：这里目标列为回归任务的目标，名称可根据实际情况调整
-    x_test, y_test, scaler, target_indices = create_sequences(test_df, seq_length=seq_length,
-                                                              target_cols=['open', 'high', 'low', 'close'])
+    x_test, y_test, _, target_indices = create_sequences(test_df, seq_length=seq_length,
+                                                              target_cols=['open', 'high', 'low', 'close'], scaler=scaler)
     test_dataset = TensorDataset(x_test, y_test)
 
     print("=" * 10 + " 构造回归模型并加载参数... " + "=" * 10)
@@ -181,6 +182,7 @@ def evaluate_model_classification_main(test_csv, model_path, batch_size=32, seq_
     device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
     model.load_state_dict (torch.load (model_path, map_location=device))
     model.eval ()
+
 
     # 使用分类评估函数，返回准确率
     accuracy = model.evaluate_model(test_dataset, batch_size=batch_size)

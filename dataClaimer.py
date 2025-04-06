@@ -3,7 +3,7 @@ import pandas as pd
 import time
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-# A+P+I_KEY = 'oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK'
+# API_K-EY = 'oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK'
 
 TICKER = 'SPY'
 MULTIPLIER = 30

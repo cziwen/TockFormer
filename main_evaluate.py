@@ -199,7 +199,7 @@ if __name__ == "__main__":
                          help="任务类型：回归或分类")
     parser.add_argument ('--test', type=str, required=True, help='测试数据 CSV 路径')
     parser.add_argument ('--model', type=str, required=True, help='模型文件路径（.pth）')
-    parser.add_argument ('--bias_corrector', type=str, help='bias corrector 文件路径，仅回归任务使用')
+    parser.add_argument ('--bias_corrector', type=str, help='bias corrector 文件路径 (.pkl)，仅回归任务使用')
     # 对于回归任务需要 scaler 文件，分类任务不需要
     parser.add_argument ('--scaler', type=str, help='Scaler 文件路径（.pkl），仅回归任务使用')
     parser.add_argument ('--batch_size', type=int, default=32, help='批大小')

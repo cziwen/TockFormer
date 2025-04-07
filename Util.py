@@ -3,9 +3,10 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
+from datetime import datetime, timedelta
 
 
-def create_sequences(data, seq_length, target_cols=None, scaler=None, scale=True):
+def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=True):
     """
     将 DataFrame 数据转换为模型的序列样本。时间会默认排除在外
 
@@ -22,43 +23,84 @@ def create_sequences(data, seq_length, target_cols=None, scaler=None, scale=True
       - scaler（MinMaxScaler 实例或 None）
       - target_indices（用于 inverse_transform）
     """
-    feature_columns = data.columns.tolist()[1:]  # 排除第一列时间戳
-    df_copy = data.copy()
-    df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype(np.float32)
+    feature_columns = data.columns.tolist ()[1:]  # 排除第一列时间戳
+    df_copy = data.copy ()
+    df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype (np.float32)
 
     # ======== 仅在 scale=True 时执行缩放 ========
     if scale:
-        print("数据被缩放")
+        print ("数据被缩放")
         if scaler is None:
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            scaler.fit(df_copy.iloc[:, 1:])  # 只 fit 特征列
-        df_copy.iloc[:, 1:] = scaler.transform(df_copy.iloc[:, 1:]).astype(np.float32)
+            scaler = MinMaxScaler (feature_range=(0, 1))
+            scaler.fit (df_copy.iloc[:, 1:])  # 只 fit 特征列
+        df_copy.iloc[:, 1:] = scaler.transform (df_copy.iloc[:, 1:]).astype (np.float32)
     else:
-        print("数据不缩放")
+        print ("数据不缩放")
         scaler = None  # 不缩放时，不返回 scaler
     # ==================================================
 
     data_array = df_copy[feature_columns].values
 
     if target_cols is None:
-        target_indices = list(range(len(feature_columns)))
-    elif isinstance(target_cols, str):
-        target_indices = [df_copy.columns.get_loc(target_cols) - 1]  # -1 因为去掉了时间列
-    elif isinstance(target_cols, list):
-        target_indices = [df_copy.columns.get_loc(col) - 1 for col in target_cols]
+        target_indices = list (range (len (feature_columns)))
+    elif isinstance (target_cols, str):
+        target_indices = [df_copy.columns.get_loc (target_cols) - 1]  # -1 因为去掉了时间列
+    elif isinstance (target_cols, list):
+        target_indices = [df_copy.columns.get_loc (col) - 1 for col in target_cols]
     else:
-        raise ValueError("target_cols 参数必须为 None, str 或 list")
-
+        raise ValueError ("target_cols 参数必须为 None, str 或 list")
 
     X, y = [], []
-    for i in range(len(data_array) - seq_length):
-        X.append(data_array[i: i + seq_length])
-        y.append(data_array[i + seq_length][target_indices])
+    for i in range (len (data_array) - seq_length):
+        X.append (data_array[i: i + seq_length])
+        y.append (data_array[i + seq_length][target_indices])
 
-    X_tensor = torch.tensor(np.array(X), dtype=torch.float32)
-    y_tensor = torch.tensor(np.array(y), dtype=torch.float32)
+    X_tensor = torch.tensor (np.array (X), dtype=torch.float32)
+    y_tensor = torch.tensor (np.array (y), dtype=torch.float32)
 
     return X_tensor, y_tensor, scaler, target_indices
+
+
+def create_prediction_sequence (data, seq_length, scaler, target_col):
+    """
+    将 DataFrame 数据转换为预测序列样本，仅返回 X_tensor 和 target_indices。
+    假设第一列为时间戳，其余列为特征，使用传入的 scaler 对特征进行归一化。
+
+    参数：
+      - data: pd.DataFrame，已按时间顺序排列，第一列为时间戳
+      - seq_length: 输入序列长度
+      - scaler: 已 fit 的 MinMaxScaler，用于归一化
+      - target_col: 单个列名或列名列表，用于后续逆缩放预测值
+
+    返回：
+      - X_tensor: torch.Tensor，形状为 [1, seq_length, F]
+      - target_indices: List[int]，在 scaler 中对应的目标列索引
+    """
+    # 提取特征列名（排除时间戳）
+    feature_columns = data.columns.tolist ()[1:]
+    df_copy = data.copy ()
+    df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype (np.float32)
+
+    # 执行归一化
+    df_copy.iloc[:, 1:] = scaler.transform (df_copy.iloc[:, 1:]).astype (np.float32)
+    data_array = df_copy[feature_columns].values
+
+    if len (data_array) < seq_length:
+        raise ValueError ("数据长度小于序列长度")
+
+    # 构造输入序列
+    X = data_array[-seq_length:]
+    X_tensor = torch.tensor (X, dtype=torch.float32).unsqueeze (0)  # [1, seq_length, F]
+
+    # 获取 target_indices（在 scaler 特征中的列位置）
+    if isinstance (target_col, str):
+        target_indices = [df_copy.columns.get_loc (target_col) - 1]  # -1 是因为排除了时间戳
+    elif isinstance (target_col, list):
+        target_indices = [df_copy.columns.get_loc (col) - 1 for col in target_col]
+    else:
+        raise ValueError ("target_col 必须是字符串或字符串列表")
+
+    return X_tensor, target_indices
 
 
 def plot_metric (values, y_label='Value', title='Training Metric', color='blue', show=True):
@@ -128,3 +170,37 @@ def safeLoadCSV (df):
         df = df.dropna ().reset_index (drop=True)  # 重新索引，确保连续性
 
     return df
+
+def display_prediction(pred, base_time=None, resolution_minutes=5):
+    """
+    美观打印模型预测的 OHLC 价格。
+
+    参数：
+      - pred: numpy array 或 list，形状为 [1, 4]，包含预测的 open, high, low, close
+      - base_time: datetime，可选，预测基准时间，若为 None 则使用当前时间
+      - resolution_minutes: int，预测步长的分钟数，默认为 5 分钟
+
+    输出：
+      - 美观的预测信息打印
+    """
+    # 处理时间
+    if base_time is None:
+        base_time = datetime.now()
+    prediction_time = base_time + timedelta(minutes=resolution_minutes)
+
+    # 处理预测值
+    pred = pred.flatten()
+    price_dict = {
+        "open": round(pred[0], 4),
+        "high": round(pred[1], 4),
+        "low":  round(pred[2], 4),
+        "close": round(pred[3], 4),
+    }
+
+    # 打印
+    print("=" * 40)
+    print(f"📅 预测时间：{prediction_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("📈 预测价格（单位：USD）：")
+    for k, v in price_dict.items():
+        print(f"  • {k:<6}: {v:.2f}")
+    print("=" * 40)

@@ -104,7 +104,12 @@ def add_factors (df):
             df[f'EMA10_{col}'] = df[col].ewm (span=10, adjust=False).mean ()
             df[f'EMA20_{col}'] = df[col].ewm (span=20, adjust=False).mean ()
 
-    # 动量指标 - 对价格计算 RSI, MACD, ROC
+        # VWAP 因子 （不包括 open）
+    if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
+
+    # 动量指标 - 对价格计算 RSI, MACD, ROC，下一个时间的百分比变化
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[f'RSI_{col}'] = calculate_rsi (df[col].values, period=14)
@@ -113,6 +118,10 @@ def add_factors (df):
             df[f'MACD_signal_{col}'] = signal_line
             df[f'MACD_histogram_{col}'] = hist
             df[f'ROC_{col}'] = calculate_roc (df[col].values, period=14)
+
+            # 百分比变化 （未添加）
+            # df[f'{col}_next_pct_change'] = (df[col].shift (-1) - df[col]) / df[col] # future pct change
+            # df[f'{col}_pct_change_sofar'] = df[col].pct_change (periods=1)
 
     if all (col in df.columns for col in ['high', 'low', 'close']):
         k, d = calculate_stochastic (df)
@@ -126,11 +135,6 @@ def add_factors (df):
         df['Volume_ROC'] = calculate_volume_roc (df['volume'].values, period=14)
         if 'close' in df.columns:
             df['OBV'] = calculate_obv (df)
-
-    # VWAP 因子 （不包括 open）
-    if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
-        typical_price = (df['high'] + df['low'] + df['close']) / 3
-        df['VWAP'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
 
     return df
 
@@ -219,7 +223,7 @@ def aggregate_high_freq_to_low (df, freq='1h', timestamp='timestamp'):
     """
 
     print ("\n清洗 open high low close 异常值, Drop 空 行 (1):")
-    df = df.copy()
+    df = df.copy ()
     df = clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
 
     df[timestamp] = pd.to_datetime (df[timestamp])
@@ -312,7 +316,7 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
     df.to_csv (output_csv, index=False)
     print (f"已生成新的 CSV 文件：{output_csv}")
 
-# # 把高频转换低频数据
+# 把高频转换低频数据
 # process_high_freq_to_low ("rawdata/SPY_10minute_test.csv", freq='30min')
 # process_high_freq_to_low ("rawdata/SPY_10minute_validate.csv", freq='30min')
 # process_high_freq_to_low ("rawdata/SPY_10minute_train.csv", freq='30min')

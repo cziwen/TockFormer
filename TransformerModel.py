@@ -312,6 +312,38 @@ class TimeSeriesTransformer (nn.Module):
 
         return train_losses, val_mse_lists, val_r2_lists, best_bias_corrector
 
+    def predict_model (self, X_tensor, scaler, bias_corrector, target_indices):
+        """
+        使用模型进行预测，并对预测结果进行逆归一化。
+        输入 X_tensor 的形状应为 [1, seq_length, input_dim]，
+        输出预测结果（经过逆归一化），形状为 [1, output_dim]。
+
+        参数:
+          - X_tensor: torch.Tensor，预测时的输入数据
+          - scaler: 用于逆归一化的 scaler
+          - bias_corrector: 如果不为 None，则对预测结果进行 bias 校正
+          - target_indices: 用于逆归一化的目标列索引
+
+        返回:
+          - pred_inv: numpy 数组，逆归一化后的预测输出
+        """
+        self.eval ()
+        device = next (self.parameters ()).device
+        X_tensor = X_tensor.to (device)
+        with torch.no_grad ():
+            pred = self (X_tensor)
+        # 将输出转换为 numpy 数组
+        pred = pred.detach ().cpu ().numpy ().astype (np.float32)
+
+        # 逆归一化（安全逆变换），使预测结果恢复到原始数值域
+        pred_inv = self.safe_inverse_transform (pred, scaler, target_indices)
+
+        # 如果传入 bias_corrector，则进行 bias 校正
+        if bias_corrector is not None:
+            pred_inv = bias_corrector.transform (pred_inv)
+
+        return pred_inv
+
 
 # ===== 测试部分 =====
 if __name__ == "__main__":

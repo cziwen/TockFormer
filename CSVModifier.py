@@ -158,7 +158,7 @@ def add_factors_to_csv (csv_path, output_dir="factoredData"):
     return output_path
 
 
-def clean_outliers (df, columns=None, z_thresh=5):
+def clean_outliers (df, columns=None, z_thresh=5, show_msg=False):
     """
     清洗 DataFrame 中价格类或数值类字段的异常值：
     - 若未指定 columns，则自动选择所有数值列
@@ -179,7 +179,8 @@ def clean_outliers (df, columns=None, z_thresh=5):
         outliers = np.abs (z_scores) > z_thresh
         outlier_indices = np.where (outliers)[0]
 
-        print (f"检测到 {len (outlier_indices)} 个异常值在 {col} 列")
+        if show_msg:
+            print (f"检测到 {len (outlier_indices)} 个异常值在 {col} 列")
 
         for i in outlier_indices:
             left = None
@@ -211,8 +212,9 @@ def clean_outliers (df, columns=None, z_thresh=5):
     df.reset_index (inplace=True, drop=True)
     dropped_rows = original_len - len (df)
 
-    print (f"✅ 替换了 {total_replaced} 个异常值")
-    print (f"❌ 删除了 {dropped_rows} 行（因为存在 NaN）")
+    if show_msg:
+        print (f"✅ 替换了 {total_replaced} 个异常值")
+        print (f"❌ 删除了 {dropped_rows} 行（因为存在 NaN）")
 
     return df
 
@@ -222,7 +224,7 @@ def aggregate_high_freq_to_low (df, freq='1h', timestamp='timestamp'):
     使用标准差等波动性指标替代原始价格信息，保留趋势性因子
     """
 
-    print ("\n清洗 open high low close 异常值, Drop 空 行 (1):")
+    # print ("\n清洗 open high low close 异常值, Drop 空 行 (1):")
     df = df.copy ()
     df = clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=5)
 
@@ -248,7 +250,7 @@ def aggregate_high_freq_to_low (df, freq='1h', timestamp='timestamp'):
 
     df_agg.reset_index (inplace=True)
 
-    print ("\n清洗 open high low close 异常值, Drop 空 行 (2):")
+    # print ("\n清洗 open high low close 异常值, Drop 空 行 (2):")
     df_agg = clean_outliers (df_agg, columns=['open', 'high', 'low', 'close'], z_thresh=10)
 
     return df_agg

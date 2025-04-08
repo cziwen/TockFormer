@@ -204,3 +204,4 @@ def display_prediction(pred, base_time=None, resolution_minutes=5):
     for k, v in price_dict.items():
         print(f"  • {k:<6}: {v:.2f}")
     print("=" * 40)
+

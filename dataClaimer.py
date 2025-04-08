@@ -1,71 +1,77 @@
-import requests
 import pandas as pd
+import requests
 import time
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-# API_K-EY = 'oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK'
 
-TICKER = 'SPY'
-MULTIPLIER = 30
-TIMESPAN = 'minute'
-FROM_DATE = '2025-03-08'
-TO_DATE = '2025-04-02'
-FOR = 'test'
+# API_KE-Y = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
 
-# 初始 URL 和参数
-base_url = f"https://api.polygon.io/v2/aggs/ticker/{TICKER}/range/{MULTIPLIER}/{TIMESPAN}/{FROM_DATE}/{TO_DATE}"
-params = {
-    'adjusted': 'true',
-    'sort': 'asc',
-    'limit': 50000,
-    'apiKey': API_KEY
-}
 
-all_data = []
+def fetch_data (symbol, interval='5min', num_bars=50):
+    """
+    使用 Finhub REST API 获取指定股票的 K 线数据。
+    """
+    interval_mapping = {
+        '1min': '1',
+        '5min': '5',
+        '10min': '10',  # 注意: Finhub API 可能不支持 10 分钟K线
+        '15min': '15',
+        '30min': '30',
+        '1h': '60',
+        '1d': 'D'
+    }
+    interval_seconds = {
+        '1min': 60,
+        '5min': 5 * 60,
+        '10min': 10 * 60,
+        '15min': 15 * 60,
+        '30min': 30 * 60,
+        '1h': 60 * 60,
+        '1d': 24 * 60 * 60
+    }
+    if interval not in interval_mapping:
+        raise ValueError ("不支持的时间间隔。请使用: " + ", ".join (interval_mapping.keys ()))
+    resolution = interval_mapping[interval]
+    safety_factor = int (8 * 24 * 60 * 60)  # 确保能够获取足够的数据
+    duration = interval_seconds[interval] * num_bars + safety_factor
 
-print(f"Fetching SPY {MULTIPLIER}-{TIMESPAN} bars...")
+    end_time = int (time.time ())
+    start_time = end_time - duration
 
-while True:
-    response = requests.get(base_url, params=params)
-    data = response.json()
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        'symbol': symbol,
+        'resolution': resolution,
+        'from': start_time,
+        'to': end_time,
+        'extended': True,
+        'token': API_KEY
+    }
 
-    if 'results' in data:
-        all_data.extend(data['results'])
-        print(f"Fetched {len(data['results'])} bars, total: {len(all_data)}")
+    response = requests.get (url, params=params)
+    if response.status_code != 200:
+        print ("响应内容：", response.text)
+        raise Exception (f"请求失败: {response.status_code}")
 
-        if 'next_url' in data:
-            # === 修复：添加 API key 到 next_url ===
-            parsed = urlparse(data['next_url'])
-            query = parse_qs(parsed.query)
-            query['apiKey'] = [API_KEY]
-            new_query = urlencode(query, doseq=True)
-            base_url = urlunparse(parsed._replace(query=new_query))
-            params = {}  # 因为 URL 里已经带了所有 query 参数
-            time.sleep(1)  # 避免速率限制
-        else:
-            break
-    else:
-        print("Error:", data.get('error', 'Unknown error'))
-        break
+    data = response.json ()
+    if data.get ('s') != 'ok':
+        print ("未获取到数据:", data)
+        return pd.DataFrame ()
 
-# === 转换为 DataFrame
-df = pd.DataFrame(all_data)
+    df = pd.DataFrame ({
+        'time': pd.to_datetime (data['t'], unit='s', utc=True).tz_convert ('America/New_York'),
+        'open': data['o'],
+        'high': data['h'],
+        'low': data['l'],
+        'close': data['c'],
+        'volume': data['v']
+    })
 
-if not df.empty:
-    df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
-    df.rename(columns={
-        'o': 'open',
-        'h': 'high',
-        'l': 'low',
-        'c': 'close',
-        'v': 'volume',
-        'vw': 'vwap',
-        'n': 'num_transactions'
-    }, inplace=True)
+    if not df.empty:
+        df = df.sort_values (by='time')
+        if len (df) > num_bars:
+            df = df.tail (num_bars)
+            df = df.reset_index (drop=True)
+    return df
 
-    df = df[['timestamp', 'open', 'high', 'low', 'close', 'vwap', 'volume', 'num_transactions']]
-    path = f"rawdata/SPY_{MULTIPLIER}{TIMESPAN}_{FOR}.csv"
-    df.to_csv(f"{path}", index=False)
-    print(f"✅ Done! Data saved to '{path}'")
-else:
-    print("⚠️ No data retrieved.")
+
+fetch_data('SPY', interval='5min')

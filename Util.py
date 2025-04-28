@@ -1,7 +1,12 @@
+from typing import Optional
+
 import pandas as pd
 import numpy as np
+import pytz
 import torch
 import matplotlib.pyplot as plt
+import requests
+
 from sklearn.preprocessing import MinMaxScaler
 from datetime import datetime, timedelta
 
@@ -142,7 +147,7 @@ def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value'
     plt.figure (figsize=(8, 5))
 
     # 生成颜色序列
-    colors = plt.cm.tab10 (np.linspace (0, 1, len (accuracy_curve_dict)))
+    colors = plt.cm.tab20 (np.linspace (0, 1, len (accuracy_curve_dict)))
 
     for i, (label, acc_curve) in enumerate (accuracy_curve_dict.items ()):
         plt.plot (range (1, len (acc_curve) + 1),
@@ -171,7 +176,8 @@ def safeLoadCSV (df):
 
     return df
 
-def display_prediction(pred, base_time=None, resolution_minutes=5):
+
+def display_prediction (pred, base_time=None, resolution_minutes=5):
     """
     美观打印模型预测的 OHLC 价格。
 
@@ -185,23 +191,108 @@ def display_prediction(pred, base_time=None, resolution_minutes=5):
     """
     # 处理时间
     if base_time is None:
-        base_time = datetime.now()
-    prediction_time = base_time + timedelta(minutes=resolution_minutes)
+        base_time = datetime.now ()
+    prediction_time = base_time + timedelta (minutes=resolution_minutes)
 
     # 处理预测值
-    pred = pred.flatten()
+    pred = pred.flatten ()
     price_dict = {
-        "open": round(pred[0], 4),
-        "high": round(pred[1], 4),
-        "low":  round(pred[2], 4),
-        "close": round(pred[3], 4),
+        "open": round (pred[0], 4),
+        "high": round (pred[1], 4),
+        "low": round (pred[2], 4),
+        "close": round (pred[3], 4),
     }
 
     # 打印
-    print("=" * 40)
-    print(f"📅 预测时间：{prediction_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("📈 预测价格（单位：USD）：")
-    for k, v in price_dict.items():
-        print(f"  • {k:<6}: {v:.2f}")
-    print("=" * 40)
+    print ("=" * 40)
+    print (f"📅 预测时间：{prediction_time.strftime ('%Y-%m-%d %H:%M:%S')}")
+    print ("📈 预测价格（单位：USD）：")
+    for k, v in price_dict.items ():
+        print (f"  • {k:<6}: {v:.2f}")
+    print ("=" * 40)
 
+
+def fetch_latest_agg_data (
+        ticker: str,
+        timespan: str = "second",
+        limit: int = 10,
+        api_key: str = "your_api_key",
+        delayed: bool = False
+) -> Optional[pd.DataFrame]:
+    """
+    获取最新 N 条聚合数据，支持 Free Plan（15分钟延迟数据）。
+
+    参数:
+        ticker: 股票代码
+        timespan: 聚合周期（second, minute, hour, day）
+        limit: 返回条数
+        api_key: Polygon API Key
+        delayed: 如果为 True，则使用美国东部时间，并回退 15 分钟
+
+    返回:
+        聚合数据 DataFrame，包含 timestamp, open, high, low, close, volume, vwap
+    """
+    eastern = pytz.timezone ("America/New_York")
+    now_et = datetime.now (eastern)
+
+    if delayed:
+        to_time = now_et - timedelta (minutes=15)
+        print (f"⚠ 使用延迟数据模式，to_time（纽约时间）= {to_time}")
+    else:
+        to_time = now_et
+
+    # 计算 from_time
+    if timespan == "second":
+        from_time = to_time - timedelta (seconds=limit)
+    elif timespan == "minute":
+        from_time = to_time - timedelta (minutes=limit)
+    elif timespan == "hour":
+        from_time = to_time - timedelta (hours=limit)
+    elif timespan == "day":
+        from_time = to_time - timedelta (days=limit)
+    else:
+        raise ValueError (f"Unsupported timespan: {timespan}")
+
+    # 转换为 ISO 格式（UTC 时间，Polygon 接收 ISO8601）
+    from_utc = from_time.astimezone (pytz.utc).strftime ("%Y-%m-%dT%H:%M:%S")
+    to_utc = to_time.astimezone (pytz.utc).strftime ("%Y-%m-%dT%H:%M:%S")
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/{timespan}/{from_utc}/{to_utc}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": limit,
+        "apiKey": api_key
+    }
+
+    response = requests.get (url, params=params)
+    if response.status_code != 200:
+        print (f"请求失败: {response.status_code} - {response.text}")
+        return None
+
+    results = response.json ().get ("results", [])
+    if not results:
+        print ("未获取到聚合数据")
+        return None
+
+    df = pd.DataFrame (results)
+    df["timestamp"] = pd.to_datetime (df["t"], unit="ms")
+    df.rename (columns={
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+        "vw": "vwap"
+    }, inplace=True)
+
+    return df[["timestamp", "open", "high", "low", "close", "volume", "vwap"]]
+
+
+symbol = 'SPY'
+API_KEY = "oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK"
+
+df_min_past = fetch_latest_agg_data (ticker=symbol, timespan="minute", limit=32,
+                                     api_key=API_KEY, delayed=True)
+# df_sec_past = fetch_latest_agg_data (ticker=symbol, timespan="second", limit=32,
+#                                      api_key=API_KEY, delayed=True)

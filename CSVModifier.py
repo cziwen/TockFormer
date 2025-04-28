@@ -93,7 +93,7 @@ def add_factors (df):
       - 趋势指标：对 open/high/low/close 计算 EMA5, EMA10, EMA20
       - 动量指标：RSI、MACD（value, signal, histogram）、ROC，以及 Stochastic 指标
       - 成交量指标：Volume SMA5, Volume SMA10, Volume ROC 和 OBV
-      - 新增 VWAP：基于 (high+low+close)/3 和 volume 计算 VWAP
+      - 新增 VWAP：基于 (high+low+close)/3 和 volume 计算 VWAP (暂时码掉)
     :param df: 包含至少 open, high, low, close, volume 列的 DataFrame
     :return: 新增因子后的 DataFrame
     """
@@ -104,10 +104,10 @@ def add_factors (df):
             df[f'EMA10_{col}'] = df[col].ewm (span=10, adjust=False).mean ()
             df[f'EMA20_{col}'] = df[col].ewm (span=20, adjust=False).mean ()
 
-        # VWAP 因子 （不包括 open）
-    if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
-        typical_price = (df['high'] + df['low'] + df['close']) / 3
-        df['vwap'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
+    # VWAP 因子 （不包括 open）
+    # if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
+    #     typical_price = (df['high'] + df['low'] + df['close']) / 3
+    #     df['vwap'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
 
     # 动量指标 - 对价格计算 RSI, MACD, ROC，下一个时间的百分比变化
     for col in ['open', 'high', 'low', 'close']:
@@ -137,6 +137,8 @@ def add_factors (df):
             df['OBV'] = calculate_obv (df)
 
     return df
+
+
 
 
 def add_factors_to_csv (csv_path, output_dir="factoredData"):
@@ -209,6 +211,8 @@ def clean_outliers (df, columns=None, z_thresh=5, show_msg=False):
     # 统一删除含 NaN 的整行
     original_len = len (df)
     df.dropna (inplace=True)
+
+    df.sort_values ("timestamp", inplace=True)  # 按时间从最远排到最近
     df.reset_index (inplace=True, drop=True)
     dropped_rows = original_len - len (df)
 
@@ -254,6 +258,50 @@ def aggregate_high_freq_to_low (df, freq='1h', timestamp='timestamp'):
     df_agg = clean_outliers (df_agg, columns=['open', 'high', 'low', 'close'], z_thresh=10)
 
     return df_agg
+
+
+def aggregate_ohlcv(df: pd.DataFrame, freq: str = '5min') -> pd.DataFrame:
+    """
+    将高频 OHLCV 数据聚合为指定频率（秒/分钟/小时）的数据。
+
+    参数：
+        df : pd.DataFrame
+            原始 OHLCV 数据，包含列：
+                - timestamp（datetime 类型）
+                - open, high, low, close, volume, vwap（可选）
+        freq : str
+            目标聚合频率（例如 '5min', '15s', '1H'）
+
+    返回：
+        pd.DataFrame: 重新采样后的 OHLCV 数据
+    """
+    df = df.copy()
+
+    # 保证 timestamp 是 datetime 类型
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df.set_index("timestamp", inplace=True)
+
+    # 定义聚合方式
+    agg_dict = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+
+    # 可选字段处理（如有 vwap）
+    if "vwap" in df.columns:
+        agg_dict["vwap"] = "mean"  # 也可自定义为加权平均
+
+    # 执行聚合
+    df_agg = df.resample(freq).agg(agg_dict)
+
+    # 去除全空行，并重置索引
+    df_agg = df_agg.dropna(how="any").reset_index()
+
+    return df_agg
+
 
 
 def process_high_freq_to_low (csv_path, output_dir="aggregatedData", freq='1h'):
@@ -319,19 +367,19 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
     print (f"已生成新的 CSV 文件：{output_csv}")
 
 # 把高频转换低频数据
-# process_high_freq_to_low ("rawdata/SPY_10minute_test.csv", freq='30min')
+# process_high_freq_to_low ("rawdata/SPY_1minute_test-april.csv", freq='5min')
 # process_high_freq_to_low ("rawdata/SPY_10minute_validate.csv", freq='30min')
 # process_high_freq_to_low ("rawdata/SPY_10minute_train.csv", freq='30min')
 #
 # # 添加因子
-# add_factors_to_csv ("rawData/SPY_30minute_test.csv")
+# add_factors_to_csv ("rawData/SPY_5minute_test-april.csv")
 # add_factors_to_csv ("rawData/SPY_30minute_train.csv")
 # add_factors_to_csv ("rawData/SPY_30minute_validate.csv")
 #
 # # 合并
-# join_csv_on_timestamp ("factoredData/SPY_30minute_test_factored.csv",
-#                        "aggregatedData/SPY_10minute_test_agg_30min.csv",
-#                        output_file="readyData/SPY_30minute_test.csv",
+# join_csv_on_timestamp ("factoredData/SPY_5minute_test-april_factored.csv",
+#                        "aggregatedData/SPY_1minute_test-april_agg_5min.csv",
+#                        output_file="readyData_ohlc/SPY_5minute_test-april.csv",
 #                        how='left')
 #
 # join_csv_on_timestamp ("factoredData/SPY_30minute_validate_factored.csv",
@@ -343,7 +391,4 @@ def add_direction_labels_to_csv (input_csv, output_csv, feature_list):
 #                        "aggregatedData/SPY_10minute_train_agg_30min.csv", output_file="readyData/SPY_30minute_train.csv",
 #                        how='left')
 
-# df = pd.read_csv("readyData/SPY_1hour_test.csv")
-# df = df.drop(columns=['num_transactions'])
-#
-# df.to_csv("readyData/SPY_1hour_test_noN.csv", index=False)
+

@@ -1,335 +1,287 @@
-import time
-import json
-import joblib
-import torch
+from polygon import WebSocketClient, RESTClient
+from polygon.websocket.models import WebSocketMessage, Feed, Market
+from typing import List, Optional
+import numpy as np
 import pandas as pd
-import requests
-import websocket
 import pytz
-import sys
-from datetime import datetime, timedelta
 
-from CSVModifier import clean_outliers, add_factors
-from TransformerModel import TimeSeriesTransformer
-from BiasCorrector import BiasCorrector
-from Util import create_prediction_sequence
+from datetime import datetime, timedelta, timezone
 
-# 全局变量：存储已完成的蜡烛数据和当前未完成的蜡烛
-aggregated_candles = []  # 已完成的5分钟蜡烛，每个元素为一个 dict
-current_candle = None  # 当前正在聚合的蜡烛
-historical_data_patched = False  # 标记是否已补充过历史数据
-ws_start_time = None
+# CSVModifier中引用的方法，假设它们已经实现：
+from CSVModifier import (
+    add_factors,
+    clean_outliers,
+    aggregate_high_freq_to_low,
+    aggregate_ohlcv
+)
 
-API_KEY = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"  # 替换为你的 API Key
+# 全局变量: 存储分钟OHLCV数据和秒级OHLCV数据
+data_buffer_sec = []
+data_buffer_min = []
 
-# 参数设置
-symbol = "SPY"  # 订阅的股票代码
-seq_length = 32  # 模型要求的蜡烛数量
-new_column_order = [
-    'time', 'open', 'high', 'low', 'close', 'vwap', 'volume',
-    'EMA5_open', 'EMA10_open', 'EMA20_open',
-    'EMA5_high', 'EMA10_high', 'EMA20_high',
-    'EMA5_low', 'EMA10_low', 'EMA20_low',
-    'EMA5_close', 'EMA10_close', 'EMA20_close',
-    'RSI_open', 'MACD_value_open', 'MACD_signal_open', 'MACD_histogram_open', 'ROC_open',
-    'RSI_high', 'MACD_value_high', 'MACD_signal_high', 'MACD_histogram_high', 'ROC_high',
-    'RSI_low', 'MACD_value_low', 'MACD_signal_low', 'MACD_histogram_low', 'ROC_low',
-    'RSI_close', 'MACD_value_close', 'MACD_signal_close', 'MACD_histogram_close', 'ROC_close',
-    'Stoch_K', 'Stoch_D', 'Volume_SMA5', 'Volume_SMA10', 'Volume_ROC', 'OBV',
-    'open_volatility', 'high_volatility', 'low_volatility', 'close_volatility', 'volume_volatility'
-]
+RESOLUTION_MINUTE = 1  # 每条数据间隔的分钟数
+SEQUENTIAL_LENGTH = 32  # 序列长度
+WINDOW_SIZE_MIN = SEQUENTIAL_LENGTH * RESOLUTION_MINUTE  # 分钟滑动窗口大小
+WINDOW_SIZE_SEC = WINDOW_SIZE_MIN * 60  # 秒级滑动窗口大小
 
-# 加载模型、scaler 和 bias_corrector
-device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
-model_path = "models/transformer_regression_5min_lam.pth"
-scaler_path = "models/scaler_regression_5min_lam.pkl"
-bias_corrector_path = "models/corrector_regression_5min_lam.pkl"
-
-model = TimeSeriesTransformer (input_dim=49, model_dim=64, num_heads=4, num_layers=2,
-                               dropout=0.2, seq_length=seq_length, output_dim=4)
-model.load_state_dict (torch.load (model_path, map_location=device))
-model.to (device)
-
-bias_corrector = BiasCorrector.load (bias_corrector_path)
-scaler = joblib.load (scaler_path)
-
-# --- 新增：全局变量用于显示 ---
-current_status_msg = ""
-current_prediction_msg = ""
+has_fetched_latest_data = False
 
 
-def update_display ():
+########################
+# 辅助函数：使用 Polygon RESTClient 获取历史数据
+########################
+def fetch_polygon_history (rest_client, symbol, timespan="minute", bars=50):
     """
-    通过 ANSI 转义序列更新终端中固定区域（两行）的显示内容：
-      第一行：预测信息；
-      第二行：状态信息。
+    从 Polygon 获取最近 N 条历史数据，并返回一个带有 timestamp 的 DataFrame。
+    timespan 可以是 'minute', 'second' 等；
+    bars 是要获取的数量（最多 bars * 2 条会被抓取，然后在函数外部筛选）。
     """
-    # 移动光标到两行预留区域的起始位置，并更新
-    sys.stdout.write ("\033[2F")  # 向上移动两行
-    sys.stdout.write ("\033[K")  # 清除当前行
-    sys.stdout.write ("Prediction: " + current_prediction_msg + "\n")
-    sys.stdout.write ("\033[K")
-    sys.stdout.write ("Status    : " + current_status_msg + "\n")
-    sys.stdout.flush ()
 
+    # 当前时间 (UTC-aware)
+    now_utc = datetime.now (timezone.utc)
 
-def fetch_data (symbol, interval='5min', num_bars=50):
-    """
-    使用 Finhub REST API 获取指定股票的 K 线数据。
-    """
-    interval_mapping = {
-        '1min': '1',
-        '5min': '5',
-        '10min': '10',  # 注意: Finhub API 可能不支持 10 分钟K线
-        '15min': '15',
-        '30min': '30',
-        '1h': '60',
-        '1d': 'D'
-    }
-    interval_seconds = {
-        '1min': 60,
-        '5min': 5 * 60,
-        '10min': 10 * 60,
-        '15min': 15 * 60,
-        '30min': 30 * 60,
-        '1h': 60 * 60,
-        '1d': 24 * 60 * 60
-    }
-    if interval not in interval_mapping:
-        raise ValueError ("不支持的时间间隔。请使用: " + ", ".join (interval_mapping.keys ()))
-    resolution = interval_mapping[interval]
-    safety_factor = int (8 * 24 * 60 * 60)  # 确保能够获取足够数据
-    duration = interval_seconds[interval] * num_bars + safety_factor
+    # 时间区间回溯（根据 timespan 类型确定）
+    if timespan == "minute":
+        delta = timedelta (minutes=bars * 2)
+    elif timespan == "second":
+        delta = timedelta (seconds=bars * 2)
+    else:
+        delta = timedelta (days=1)
 
-    end_time = int (time.time ())
-    start_time = end_time - duration
+    from_utc = now_utc - delta
 
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {
-        'symbol': symbol,
-        'resolution': resolution,
-        'from': start_time,
-        'to': end_time,
-        'extended': True,
-        'token': API_KEY
-    }
+    # 转为符合 Polygon 要求的时间字符串
+    from_str = from_utc.strftime ("%Y-%m-%d")
+    to_str = now_utc.strftime ("%Y-%m-%d")
 
-    response = requests.get (url, params=params)
-    if response.status_code != 200:
-        print ("响应内容：", response.text)
-        raise Exception (f"请求失败: {response.status_code}")
+    # 调用 Polygon API，ticker 传 symbol
+    aggs = rest_client.get_aggs (
+        ticker=symbol,
+        multiplier=1,
+        timespan=timespan,
+        from_=from_str,
+        to=to_str,
+        limit=bars * 2,
+        sort="desc",  # 倒序返回（新数据在前）
+        adjusted=False  # 是否复权
+    )
 
-    data = response.json ()
-    if data.get ('s') != 'ok':
-        print ("未获取到数据:", data)
-        return pd.DataFrame ()
+    # 转为 DataFrame（不同版本返回的对象可能不同）
+    df = pd.DataFrame (aggs)
 
-    df = pd.DataFrame ({
-        'time': pd.to_datetime (data['t'], unit='s', utc=True).tz_convert ('America/New_York'),
-        'open': data['o'],
-        'high': data['h'],
-        'low': data['l'],
-        'close': data['c'],
-        'volume': data['v']
-    })
-
+    # 处理时间戳字段
     if not df.empty:
-        df = df.sort_values (by='time')
-        if len (df) > num_bars:
-            df = df.tail (num_bars)
-            df = df.reset_index (drop=True)
+        df["timestamp"] = pd.to_datetime (df["timestamp"], unit="ms", utc=True)
+        df["timestamp"] = df["timestamp"].dt.tz_convert (pytz.timezone ('US/Eastern')) # 转换为美东时间
+
     return df
 
 
-def patch_historical_data ():
+########################
+# WebSocket 消息处理
+########################
+def process_message (m: WebSocketMessage):
     """
-    通过 REST API 获取历史 5 分钟数据，并将其拼接到 WS 聚合数据的前面。
+    将 WebSocketMessage 解析为包含 OHLCV 等字段的字典。
+    假设消息包含以下属性 (Polygon Aggregates):
+      - m.start_timestamp / m.s: 开始时间毫秒
+      - m.open / m.o
+      - m.high / m.h
+      - m.low / m.l
+      - m.close / m.c
+      - m.volume / m.v
+      - m.vwap
+      - m.event_type / m.ev
+    若字段或格式不同，请根据实际情况进行调整。
     """
-    global aggregated_candles, historical_data_patched
-    print ("开始通过 REST API 补充历史数据...")
-    rest_df = fetch_data (symbol, interval='5min', num_bars=seq_length + 10)
-    if rest_df.empty:
-        print ("无法通过 REST API 补充历史数据")
-        return
-    rest_candles = rest_df.to_dict (orient='records')
-    if aggregated_candles:
-        ws_start_time_local = aggregated_candles[0]['time']
-        rest_candles = [c for c in rest_candles if c['time'] < ws_start_time_local]
-    aggregated_candles[:] = rest_candles + aggregated_candles
-    aggregated_candles.sort (key=lambda x: x['time'])
-    historical_data_patched = True
-    # df = pd.DataFrame (aggregated_candles)
-    # print (df)
-    print ("历史数据补充完成，共计蜡烛数：", len (aggregated_candles))
-    print ("\n")
-
-
-def display_current_and_prediction (current_row, pred, resolution_minutes=5):
-    """
-    构造预测信息摘要，并更新预测显示区域（单行）。
-    """
-    global current_prediction_msg
-    current_time = current_row['time']
-    # 确保当前时间为纽约时区
-    if current_time.tzinfo is None or current_time.tzinfo.utcoffset (current_time) is None:
-        current_time = pd.to_datetime (current_time, utc=True).tz_convert ('America/New_York')
-    else:
-        current_time = current_time.tz_convert ('America/New_York')
-    predicted_time = current_time + timedelta (minutes=resolution_minutes)
-    pred = pred.flatten ()
-    predicted_price = {
-        "open": round (pred[0], 4),
-        "high": round (pred[1], 4),
-        "low": round (pred[2], 4),
-        "close": round (pred[3], 4)
-    }
-    # 构造一行摘要信息
-    current_prediction_msg = (f"{current_time.strftime ('%Y-%m-%d %H:%M:%S')} | "
-                              f"Current: O:{current_row['open']:.2f} H:{current_row['high']:.2f} "
-                              f"L:{current_row['low']:.2f} C:{current_row['close']:.2f} -> "
-                              f"Pred {predicted_time.strftime ('%H:%M:%S')}: "
-                              f"O:{predicted_price['open']:.2f} H:{predicted_price['high']:.2f} "
-                              f"L:{predicted_price['low']:.2f} C:{predicted_price['close']:.2f}")
-    update_display ()
-
-
-def run_prediction_if_possible ():
-    """
-    当累计完整蜡烛数达到要求时，构建 DataFrame、预测，并展示预测结果。
-    同时限制 aggregated_candles 只保留最新的 seq_length 个蜡烛。
-    """
-    global aggregated_candles
-    if len (aggregated_candles) >= seq_length:
-        # 限制缓存数据，只保留最近 seq_length 个蜡烛
-        if len (aggregated_candles) > seq_length:
-            aggregated_candles[:] = aggregated_candles[-seq_length:]
-        df = pd.DataFrame (aggregated_candles)
-        df = df.sort_values (by="time").reset_index (drop=True)
-        if new_column_order:
-            df = df[new_column_order]
-        df = add_factors (df)
-        clean_outliers (df, columns=['open', 'high', 'low', 'close'], z_thresh=10)
-
-        x, target_indices = create_prediction_sequence (df, seq_length=seq_length,
-                                                        scaler=scaler,
-                                                        target_col=['open', 'high', 'low', 'close'])
-        preds = model.predict_model (x, scaler=scaler, target_indices=target_indices,
-                                     bias_corrector=bias_corrector)
-        current_row = df.iloc[-1]
-        display_current_and_prediction (current_row, preds, resolution_minutes=5)
-
-
-def aggregate_trade (trade):
-    """
-    将单笔交易聚合到当前5分钟蜡烛中。如果检测到进入新时间区间，
-    并且当前蜡烛已经足够完整（即 trade_time >= 当前蜡烛开始时间+5分钟），
-    则将该蜡烛认为完整并保存到 aggregated_candles 中，
-    然后启动新的蜡烛，并尝试预测。
-    """
-    global current_candle, aggregated_candles, historical_data_patched, ws_start_time
-
-    price = trade['p']
-    trade_volume = trade['v']
-    # 使用 timezone-aware 的 fromtimestamp，将毫秒时间戳转换为纽约时区时间
-    trade_time = datetime.fromtimestamp (trade['t'] / 1000, tz=pytz.UTC)
-    trade_time = trade_time.astimezone (pytz.timezone ("America/New_York"))
-    # 向下取整到最近的 5 分钟整点
-    floored_minute = trade_time.minute - (trade_time.minute % 5)
-    candle_time = trade_time.replace (minute=floored_minute, second=0, microsecond=0)
-
-    if current_candle is None:
-        current_candle = {
-            "time": candle_time,
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price,
-            "volume": trade_volume
+    try:
+        ohlcv = {
+            "timestamp": datetime.fromtimestamp (m.start_timestamp / 1000.0),  # k线开始的时间
+            "open": m.open,
+            "high": m.high,
+            "low": m.low,
+            "vwap": m.vwap,
+            "close": m.close,
+            "volume": m.volume
         }
-    else:
-        # 更新当前蜡烛（同一时间区间内）
-        if candle_time == current_candle["time"]:
-            current_candle["high"] = max (current_candle["high"], price)
-            current_candle["low"] = min (current_candle["low"], price)
-            current_candle["close"] = price
-            current_candle["volume"] += trade_volume
-        # 进入新的时间区间，判断当前蜡烛是否足够完整
-        elif candle_time > current_candle["time"]:
-            # 修改后的判断条件：交易时间超过当前蜡烛开始时间+5分钟
-            if current_candle["time"] >= ws_start_time and trade_time >= current_candle["time"] + timedelta (minutes=5):
-                aggregated_candles.append (current_candle)
+        return ohlcv, m.event_type
+    except Exception as e:
+        print ("Error processing message:", e)
+        return None, None
+
+
+def preprocess_data () -> pd.DataFrame:
+    """
+    将 OHLCV 字典列表转换为 Pandas DataFrame，进行数据预处理。
+    - 分钟数据 => 聚合成 5min
+    - 秒数据 => 聚合成 5min
+    - 合并后加因子
+    """
+    global data_buffer_sec, data_buffer_min
+
+    # 1) 分钟数据 => 5min
+    df_min = pd.DataFrame (data_buffer_min)
+    if df_min.empty:
+        return pd.DataFrame ()
+
+    df_5min = aggregate_ohlcv (df_min, freq="5min")
+    df_5min = clean_outliers (df_5min, columns=["open", "high", "low", "close"], z_thresh=8)
+
+    # 2) 秒数据 => 5min
+    df_sec = pd.DataFrame (data_buffer_sec)
+    if df_sec.empty:
+        return pd.DataFrame ()
+
+    df_sec_5min_agg = aggregate_high_freq_to_low (df_sec, freq="5min", timestamp="timestamp")
+    df_sec_5min_agg = clean_outliers (df_sec_5min_agg, columns=["open", "high", "low", "close"], z_thresh=8)
+
+    # 3) 加因子
+    df_5min = add_factors (df_5min)
+
+    # 4) 合并
+    df_merged = pd.merge (df_sec_5min_agg, df_5min, on="timestamp", how="inner")
+    return df_merged
+
+
+def predict (model_input: pd.DataFrame) -> float:
+    """
+    用预处理后的数据做预测。预测可以是下一个价格、涨跌信号等等。
+    这里简单示例：最后一个 close 略微上升。
+    """
+    dummy_prediction = model_input["close"].iloc[-1] * 1.001
+    return dummy_prediction
+
+
+def handle_msg (msg: List[WebSocketMessage]):
+    """
+    WebSocket 收到新消息后的回调。
+    """
+    global data_buffer_sec, data_buffer_min, has_fetched_latest_data
+
+    for m in msg:
+        ohlcv, ev = process_message (m)
+        if ohlcv is not None:
+            # ev == "A" 代表 秒级数据（A.<symbol>）
+            # ev == "AM" 代表 分钟级数据（AM.<symbol>）
+            if ev == "A":
+                data_buffer_sec.append (ohlcv)
+                # 控制秒级滑动窗口大小
+                if len (data_buffer_sec) > WINDOW_SIZE_SEC:
+                    data_buffer_sec = data_buffer_sec[-WINDOW_SIZE_SEC:]
+            elif ev == "AM":
+                data_buffer_min.append (ohlcv)
+                # 控制分钟级滑动窗口大小
+                if len (data_buffer_min) > WINDOW_SIZE_MIN:
+                    data_buffer_min = data_buffer_min[-WINDOW_SIZE_MIN:]
             else:
-                # 不足5分钟则不保存当前蜡烛
-                pass
+                print (f"Unexpected event type: {ev}")
 
-            # 开启新的蜡烛
-            current_candle = {
-                "time": candle_time,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": trade_volume
-            }
+        print (
+            f"[{datetime.now ().time ()}] 成功处理完 ohlcv: {ohlcv}, 当前秒级缓存数={len (data_buffer_sec)}, 分钟级缓存数={len (data_buffer_min)}")
 
-            # 第一次新蜡烛产生时补充历史数据（仅一次）
-            if not historical_data_patched and len (aggregated_candles) > 0:
-                patch_historical_data ()
+    # 如果分钟数据大于一定数量，且尚未获取过历史数据，则调用 RESTClient 获取
+    if len (data_buffer_min) > 0 and not has_fetched_latest_data:
+        print ("开始获取往期数据...")
 
-            # 每次新蜡烛产生后尝试预测
-            run_prediction_if_possible ()
+        # ------------------------------------------------------------------
+        # fetch_polygon_history 返回的 DataFrame（或可转换为 DataFrame 的数据）
+        # 已经是"时间降序"的，所以只需要 head(...) 获取最新的几行
+        # ------------------------------------------------------------------
+        past_min_data = fetch_polygon_history (rest_client, symbol, timespan="minute", bars=WINDOW_SIZE_MIN * 2)
+        past_sec_data = fetch_polygon_history (rest_client, symbol, timespan="second", bars=WINDOW_SIZE_SEC * 2)
 
-    return current_candle["time"].replace (microsecond=0).strftime ("%Y-%m-%d %H:%M:%S")
+        # 转为 DataFrame
+        df_past_min = pd.DataFrame (past_min_data.to_dict (orient="records"))
+        df_past_sec = pd.DataFrame (past_sec_data.to_dict (orient="records"))
+
+        # 仅取最新的 N 条记录（因为是时间降序，head(n) 即可）
+        df_past_min = df_past_min.head (WINDOW_SIZE_MIN * 2)
+        df_past_sec = df_past_sec.head (WINDOW_SIZE_SEC * 2)
+
+        # timestamp 转为 datetime
+        df_past_min["timestamp"] = pd.to_datetime (df_past_min["timestamp"])
+        df_past_sec["timestamp"] = pd.to_datetime (df_past_sec["timestamp"])
+
+        # 再将其按时间升序排一下
+        df_past_min.sort_values (by="timestamp", inplace=True)
+        df_past_sec.sort_values (by="timestamp", inplace=True)
+
+        # 合并历史数据和实时 buffer
+        # 注意这里是先把 buffer 转为 DataFrame，然后做 concat 或者直接加到列表
+        df_min_combined = pd.DataFrame (data_buffer_min + df_past_min.to_dict (orient="records"))
+        df_sec_combined = pd.DataFrame (data_buffer_sec + df_past_sec.to_dict (orient="records"))
+
+        # 去重
+        df_min_combined.drop_duplicates (subset="timestamp", keep="last", inplace=True)
+        df_sec_combined.drop_duplicates (subset="timestamp", keep="last", inplace=True)
+
+        # 再次按时间升序
+        df_min_combined.sort_values (by="timestamp", inplace=True)
+        df_sec_combined.sort_values (by="timestamp", inplace=True)
+
+        # 截断到固定窗口大小
+        df_min_combined = df_min_combined.tail (WINDOW_SIZE_MIN)
+        df_sec_combined = df_sec_combined.tail (WINDOW_SIZE_SEC)
+
+        # 进行“每条间隔约 1 分钟”校验（分钟数据）
+        valid_min_data = False
+        if len (df_min_combined) > 1:
+            # 计算相邻行的时间差（秒）
+            time_diffs = df_min_combined["timestamp"].diff ().dt.total_seconds ().iloc[1:]
+
+            # 设置一个容差，比如 ±1 秒
+            lower_bound = 58
+            upper_bound = 62
+
+            # 检查是否所有的时间差都在 [58, 62] 区间内
+            if time_diffs.between (lower_bound, upper_bound).all ():
+                valid_min_data = True
+
+        # 如果分钟数据有效，则更新全局 buffer；否则给出提示
+        if valid_min_data:
+            data_buffer_min = df_min_combined.to_dict (orient="records")
+            data_buffer_sec = df_sec_combined.to_dict (orient="records")
+
+            has_fetched_latest_data = True
+            print ("成功获取并合并往期数据，且分钟数据间隔校验通过。")
+        else:
+            has_fetched_latest_data = True
+            print ("警告：合并后的历史分钟数据不连续，未设置 has_fetched_latest_data。")
+
+    # 当数据量达到预设滑动窗口大小后，进行预处理和预测
+    if len (data_buffer_min) >= WINDOW_SIZE_MIN:
+        print ("开始数据预处理...")
+        preprocessed_df = preprocess_data ()
+        if not preprocessed_df.empty:
+            print (f"预处理的数据维度: {preprocessed_df.shape}")
+            # 这里可插入你的模型预测逻辑
+            # prediction = predict(preprocessed_df)
+            # print(f"预测结果: {prediction}")
+        print ("预处理结束。")
 
 
-def on_message (ws, message):
-    """
-    WebSocket 接收消息回调：处理交易数据，更新状态，并调用聚合函数。
-    """
-    global current_status_msg
-    data = json.loads (message)
-    if data.get ('type') == 'trade':
-        trades = data.get ('data', [])
-        for trade in trades:
-            if trade.get ('s') == symbol:  # 只处理指定股票
-                current_candle_time = aggregate_trade (trade)
-                current_status_msg = (f"[{datetime.now ().strftime ('%H:%M:%S')}] "
-                                      f"Aggregating for {current_candle_time} | "
-                                      f"Trade: price={trade.get ('p')}, volume={trade.get ('v')} | "
-                                      f"Aggregated candles: {len (aggregated_candles)}")
-                update_display ()
-
-
-def on_open (ws):
-    """
-    WebSocket 连接建立后订阅指定股票的交易数据，并初始化显示区域。
-    """
-    global ws_start_time
-    ws_start_time = datetime.now (pytz.timezone ("America/New_York"))
-    subscribe_message = {"type": "subscribe", "symbol": symbol}
-    ws.send (json.dumps (subscribe_message))
-    print (f"Subscribed to {symbol}. WS 启动时间: {ws_start_time.strftime ('%Y-%m-%d %H:%M:%S')}")
-    # 预留两行用于实时更新（Prediction 与 Status）
-    print ("Prediction: ")
-    print ("Status    : ")
-
-
-def on_close (ws, close_status_code, close_msg):
-    print ("WebSocket Closed")
-
-
-def start_ws ():
-    """
-    启动 WebSocket 客户端，连接至 Finhub 的 WebSocket API。
-    """
-    token = API_KEY
-    socket_url = f"wss://ws.finnhub.io?token={token}"
-    ws = websocket.WebSocketApp (socket_url,
-                                 on_open=on_open,
-                                 on_message=on_message,
-                                 on_close=on_close)
-    ws.run_forever ()
-
-
+########################
+# 主入口
+########################
 if __name__ == "__main__":
-    start_ws ()
+    # 你的 Polygon API Key
+    API_KEY = "oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK"
+
+    # 初始化 Polygon RESTClient
+    rest_client = RESTClient (api_key=API_KEY)
+
+    # 初始化 Polygon WebSocket 客户端（示例使用 Delayed Feed，可按需求改为 RealTime)
+    ws = WebSocketClient (
+        api_key=API_KEY,
+        feed=Feed.Delayed,
+        market=Market.Stocks
+    )
+
+    symbol = "SPY"
+
+    # 订阅 SPY 的分钟和秒聚合数据
+    ws.subscribe (f"AM.{symbol}")
+    ws.subscribe (f"A.{symbol}")
+
+    # 启动 WebSocket 客户端
+    ws.run (handle_msg=handle_msg)

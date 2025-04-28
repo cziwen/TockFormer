@@ -174,11 +174,11 @@ class TimeSeriesTransformer (nn.Module):
         targets = self.safe_inverse_transform (targets, scaler, target_indices)
 
         if fit:
-            # 验证阶段得到 preds 和 targets（经过 inverse transform 后）
+            # 《验证阶段》得到 preds 和 targets（经过 inverse transform 后）
             bias_corrector = BiasCorrector (mode='linear')
             bias_corrector.fit (preds, targets)
         elif bias_corrector is not None:
-            # 测试阶段得到 preds（经过 inverse transform 后）
+            # 《测试阶段》得到 preds（经过 inverse transform 后）
             preds = bias_corrector.transform (preds)
         else:
             print ("没有使用 bias corrector")

@@ -135,16 +135,3 @@ if __name__ == "__main__":
             num_heads=args.num_heads,
             dropout=args.dropout
         )
-    elif args.task == "classification":
-        evaluate_model_classification_main (
-            test_csv=args.test,
-            model_path=args.model,
-            batch_size=args.batch_size,
-            seq_length=args.sequential_length,
-            input_dim=args.input_dim,
-            model_dim=args.model_dim,
-            output_dim=args.output_dim,
-            num_layers=args.num_layers,
-            num_heads=args.num_heads,
-            dropout=args.dropout
-        )

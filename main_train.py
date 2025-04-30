@@ -183,20 +183,3 @@ if __name__ == "__main__":
             dropout=args.dropout,
             patience=args.patience,
         )
-    elif args.task == "classification":
-        train_model_classification_main (
-            train_csv=args.train,
-            val_csv=args.val,
-            model_out=args.model_out,
-            batch_size=args.batch_size,
-            epochs=args.epochs,
-            lr=args.lr,
-            seq_length=args.sequential_length,
-            input_dim=args.input_dim,
-            output_dim=args.output_dim,
-            model_dim=args.model_dim,
-            num_layers=args.num_layers,
-            num_heads=args.num_heads,
-            dropout=args.dropout,
-            patience=args.patience,
-        )

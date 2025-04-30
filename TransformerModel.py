@@ -175,7 +175,7 @@ class TimeSeriesTransformer (nn.Module):
 
         if fit:
             # 《验证阶段》得到 preds 和 targets（经过 inverse transform 后）
-            bias_corrector = BiasCorrector (mode='linear')
+            bias_corrector = BiasCorrector (mode='mlp')
             bias_corrector.fit (preds, targets)
         elif bias_corrector is not None:
             # 《测试阶段》得到 preds（经过 inverse transform 后）

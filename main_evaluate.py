@@ -8,7 +8,6 @@ import joblib
 
 from BiasCorrector import BiasCorrector
 from TransformerModel import TimeSeriesTransformer
-from TransformerModel_classify import TimeSeriesTransformer_classify
 from Util import create_sequences, safeLoadCSV, plot_metric, plot_multiple_curves
 
 
@@ -57,43 +56,6 @@ def evaluate_model_regression_main (test_csv, model_path, scaler_path, bias_corr
     curve_dict['predicts'] = preds[:, 3]
     curve_dict['targets'] = targets[:, 3]
     plot_multiple_curves (curve_dict, x_label='interval', y_label='price')
-
-
-def evaluate_model_classification_main (test_csv, model_path, batch_size=32, seq_length=32,
-                                        input_dim=33, model_dim=64, output_dim=3, num_layers=2,
-                                        num_heads=4, dropout=0.2):
-    """
-    分类任务评估函数：
-    - 加载测试数据（假设目标列为 'label'，标签为整数）
-    - 直接计算分类准确率
-    """
-    print ("=" * 10 + " 加载分类任务测试数据中... " + "=" * 10)
-    test_df = pd.read_csv (test_csv)
-    # 修改点：针对分类任务，假设目标列名称为 'label'
-    x_test, y_test, _, _ = create_sequences (test_df, seq_length=seq_length,
-                                             target_cols=['label'])
-    # 将标签转换为 LongTensor 以适用于 CrossEntropyLoss
-    # y_test = y_test.long()
-    test_dataset = TensorDataset (x_test, y_test)
-
-    print ("=" * 10 + " 构造分类模型并加载参数... " + "=" * 10)
-    model = TimeSeriesTransformer_classify (
-        input_dim=input_dim,
-        model_dim=model_dim,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout=dropout,
-        seq_length=seq_length,
-        output_dim=output_dim  # output_dim 表示类别数
-    )
-
-    device = torch.device ("cuda" if torch.cuda.is_available () else "cpu")
-    model.load_state_dict (torch.load (model_path, map_location=device))
-    model.eval ()
-
-    # 使用分类评估函数，返回准确率
-    accuracy = model.evaluate_model (test_dataset, batch_size=batch_size)
-    print ("测试集准确率: {:.4f}".format (accuracy))
 
 
 if __name__ == "__main__":

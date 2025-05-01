@@ -1,10 +1,11 @@
 import math
 import torch
 import torch.nn as nn
-import numpy as np
 import copy
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import KFold, ParameterGrid
+
 from BiasCorrector import *
 
 
@@ -60,9 +61,6 @@ class TimeSeriesTransformer (nn.Module):
         self.input_linear = nn.Linear (input_dim, model_dim)
         # 可以再加一层，做升维/降维
 
-        # 可选的 LayerNorm（这里暂时注释掉）
-        # self.input_norm = nn.LayerNorm(model_dim)
-
         # 位置编码模块
         self.positional_encoding = PositionalEncoding (model_dim, dropout=dropout, max_len=seq_length)
         # Transformer 编码器
@@ -75,20 +73,6 @@ class TimeSeriesTransformer (nn.Module):
             nn.ReLU (),
             nn.Linear (64, output_dim)
         )
-        # 可选的输出归一化（这里暂时注释掉）
-        # self.output_norm = nn.LayerNorm(model_dim)
-
-        # -------------------------------
-        # 残差偏移模块（Residual Bias Module）
-        # 根据最后一个时间步的隐藏状态计算一个动态偏移值，
-        # self.residual_bias = nn.Sequential (
-        #     nn.Linear (model_dim, 32),
-        #     nn.ReLU (),
-        #     nn.Linear (32, output_dim)
-        # )
-
-        # Learnable scalar bias for each output dimension（静态）
-        # self.learnable_bias = nn.Parameter (torch.zeros (output_dim))  # shape: [output_dim]
 
     def forward (self, src):
         """
@@ -113,14 +97,6 @@ class TimeSeriesTransformer (nn.Module):
         x_last = encoder_output[:, -1, :]
         out = self.output_regressor (x_last)
 
-        # 计算动态偏移值
-        # bias_output = self.residual_bias (x_last)  # shape: [batch_size, output_dim]
-        #
-        # out = bias_output + out
-
-        # 添加静态偏移值
-        # out = out + self.learnable_bias
-
         return out
 
     def safe_inverse_transform (self, preds, scaler, target_indices):
@@ -132,8 +108,7 @@ class TimeSeriesTransformer (nn.Module):
             preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
         return preds_inv
 
-    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3], fit=False,
-                        bias_corrector=None):
+    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3]):
         """
         在验证集上评估模型，计算各目标特征的 MSE 和 R²，并返回逆缩放后的预测值和真实值
 
@@ -169,19 +144,9 @@ class TimeSeriesTransformer (nn.Module):
         preds = np.concatenate (preds, axis=0).astype (np.float32)
         targets = np.concatenate (targets, axis=0).astype (np.float32)
 
-        # 逆变换预测值和真实值
+        # 逆变换预测值
         preds = self.safe_inverse_transform (preds, scaler, target_indices)
-        targets = self.safe_inverse_transform (targets, scaler, target_indices)
-
-        if fit:
-            # 《验证阶段》得到 preds 和 targets（经过 inverse transform 后）
-            bias_corrector = BiasCorrector (mode='mlp')
-            bias_corrector.fit (preds, targets)
-        elif bias_corrector is not None:
-            # 《测试阶段》得到 preds（经过 inverse transform 后）
-            preds = bias_corrector.transform (preds)
-        else:
-            print ("没有使用 bias corrector")
+        # targets = self.safe_inverse_transform (targets, scaler, target_indices) # 不需要inverse 真实值
 
         mse_list = []
         r2_list = []
@@ -189,11 +154,11 @@ class TimeSeriesTransformer (nn.Module):
             mse_list.append (mean_squared_error (targets[:, i], preds[:, i]))
             r2_list.append (r2_score (targets[:, i], preds[:, i]))
 
-        return mse_list, r2_list, preds, targets, bias_corrector
+        return mse_list, r2_list, preds, targets
 
     def train_model (self, train_dataset, val_dataset=None, num_epochs=50, batch_size=32,
                      learning_rate=1e-4, scaler=None, target_indices=None, patience=10,
-                     min_delta=1e-5, batch_shuffle_threshold=50):
+                     min_delta=1e-5, batch_shuffle_threshold=50, log=False):
         """
         训练模型，在每个 epoch 后评估验证集性能，并实现 early stopping 以及中间的训练数据重新打乱策略。
         如果在验证集上连续 patience 个 epoch 没有取得更好的性能，则回溯到上次表现最好的模型参数。
@@ -212,7 +177,6 @@ class TimeSeriesTransformer (nn.Module):
 
         best_val_mse = float ('inf')
         best_model_state = None  # 保存表现最好的模型参数
-        best_bias_corrector = None  # 跟模型保存最好的corrector
         epochs_no_improve = 0
         early_stop = False
 
@@ -266,38 +230,38 @@ class TimeSeriesTransformer (nn.Module):
 
                 # 如果连续 bad batch 超过阈值，则重新打乱训练数据（内部策略，不做模型回溯）
                 if bad_batch_count >= batch_shuffle_threshold:
-                    print (
-                        f"Epoch {epoch + 1}: Bad batch threshold reached at batch {batch_idx + 1}. Reshuffling training data.")
+                    if log:
+                        print (
+                            f"Epoch {epoch + 1}: Bad batch threshold reached at batch {batch_idx + 1}. Reshuffling training data.")
                     # 重新创建 train_loader
                     train_loader = DataLoader (train_dataset, batch_size=batch_size, shuffle=True)
                     batch_iterator = iter (train_loader)
                     num_batches = len (train_loader)
                     bad_batch_count = 0  # 重置计数
                     # 注意：这里不会回溯模型参数，只是换个顺序继续训练
-                    # 如果需要对模型参数进行回溯，请使用 early stopping 保存的模型
                 batch_idx += 1
 
             avg_loss = total_loss / num_batches
             train_losses.append (avg_loss)
-            print (f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_loss:.6f}")
+            if log:
+                print (f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {avg_loss:.6f}")
 
             if val_dataset is not None:
-                mse_list, r2_list, _, _, bias_corrector = self.evaluate_model (val_dataset, batch_size=batch_size,
-                                                                               scaler=scaler,
-                                                                               target_indices=target_indices,
-                                                                               fit=True)
+                mse_list, r2_list, _, _ = self.evaluate_model (val_dataset, batch_size=batch_size,
+                                                               scaler=scaler,
+                                                               target_indices=target_indices)
                 val_mse_lists.append (mse_list)
                 val_r2_lists.append (r2_list)
 
                 best_avg_mse = np.mean (mse_list)
-                print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
+                if log:
+                    print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
 
                 # 如果当前验证指标比之前更好，则保存模型参数
                 if best_avg_mse + min_delta < best_val_mse:
                     best_val_mse = best_avg_mse
                     epochs_no_improve = 0
                     best_model_state = copy.deepcopy (self.state_dict ())  # 保存最佳模型参数
-                    best_bias_corrector = bias_corrector
                 else:
                     epochs_no_improve += 1
                     if epochs_no_improve >= patience:
@@ -310,7 +274,7 @@ class TimeSeriesTransformer (nn.Module):
         if not early_stop:
             print ("Training finished without early stopping.")
 
-        return train_losses, val_mse_lists, val_r2_lists, best_bias_corrector
+        return train_losses, val_mse_lists, val_r2_lists
 
     def predict_model (self, X_tensor, scaler, bias_corrector, target_indices):
         """
@@ -344,28 +308,106 @@ class TimeSeriesTransformer (nn.Module):
 
         return pred_inv
 
+    def cross_validate (self, dataset, k=5, num_epochs=50,
+                        batch_size=32, learning_rate=1e-4,
+                        scaler=None, target_indices=None,
+                        patience=10, min_delta=1e-5,
+                        batch_shuffle_threshold=50):
+        """
+        执行 k 折交叉验证，返回每折的验证 MSE 和 R²。
+
+        参数:
+          - dataset: 完整数据集 (input, target) tuples, TensorDataset
+          - k: 折数
+          - 其余参数同 train_model
+
+        返回:
+          - results: 一个列表，元素为 dict，包含 'mse' 和 'r2' 两个字段，分别为该折最后一次验证的指标列表
+        """
+        kf = KFold (n_splits=k, shuffle=True, random_state=42)
+        results = []
+        for fold, (train_idx, val_idx) in enumerate (kf.split (dataset)):
+            print (f"=== Fold {fold + 1}/{k} ===")
+            train_sub = Subset (dataset, train_idx)
+            val_sub = Subset (dataset, val_idx)
+            # 深拷贝模型，保证每折从相同初始化开始
+            model = copy.deepcopy (self)
+            model.train_model (
+                train_sub, val_dataset=val_sub,
+                num_epochs=num_epochs, batch_size=batch_size,
+                learning_rate=learning_rate, scaler=scaler,
+                target_indices=target_indices, patience=patience,
+                min_delta=min_delta, batch_shuffle_threshold=batch_shuffle_threshold
+            )
+            mse_list, r2_list, _, _ = model.evaluate_model (
+                val_sub, batch_size=batch_size,
+                scaler=scaler, target_indices=target_indices
+            )
+            results.append ({'mse': mse_list, 'r2': r2_list})
+        return results
+
+
+def grid_search (model_class, init_args, dataset, param_grid, cv=5,
+                 scaler=None, target_indices=None):
+    """
+    对架构超参数进行网格搜索，使用交叉验证选择最优配置。
+
+    参数:
+      - model_class: TimeSeriesTransformer 类
+      - init_args: dict, 除了可调超参外的固定初始化参数，例如 {'input_dim':49,'output_dim':4,'seq_length':100,'dropout':0.1}
+      - dataset: 完整数据集, TensorDataset(input, label)
+      - param_grid: dict, key 为模型初始化参数名（如 'model_dim','num_heads','num_layers'），value 为列表
+      - cv: 折数
+      - scaler, target_indices: 同前
+
+    返回:
+      - best_params: 最佳参数组合（仅包含可调参数）
+      - best_score: 对应的平均 MSE
+    """
+    best_score = float ('inf')
+    best_params = None
+    for params in ParameterGrid (param_grid):
+        print (f"Testing architecture params: {params}")
+        # 合并固定参数与可调参数，重新实例化模型
+        model_kwargs = {**init_args, **params}
+        model = model_class (**model_kwargs)
+        # 使用默认训练配置进行 CV
+        cv_results = model.cross_validate (
+            dataset,
+            k=cv,
+            scaler=scaler,
+            target_indices=target_indices
+        )
+        # 计算平均 MSE
+        mean_mse = np.mean ([np.mean (res['mse']) for res in cv_results])
+        print (f" Avg CV MSE: {mean_mse:.6f}\n")
+        if mean_mse < best_score:
+            best_score = mean_mse
+            best_params = params
+    return best_params, best_score
+
 
 # ===== 测试部分 =====
-if __name__ == "__main__":
-    # 测试时构造一个简单模型，并用随机数据测试前向传播
-    batch_size = 32
-    seq_length = 50
-    input_dim = 10
-
-    model_dim = 64
-    num_heads = 4
-    num_layers = 2
-    output_dim = 1
-
-    model = TimeSeriesTransformer (input_dim=input_dim,
-                                   model_dim=model_dim,
-                                   num_heads=num_heads,
-                                   num_layers=num_layers,
-                                   dropout=0.1,
-                                   seq_length=seq_length,
-                                   output_dim=output_dim)
-
-    # 构造随机输入数据，测试模型前向传播
-    sample_input = torch.randn (batch_size, seq_length, input_dim)
-    output = model (sample_input)
-    print ("模型输出形状：", output.shape)  # 期望形状为 [batch_size, output_dim]
+# if __name__ == "__main__":
+#     # 测试时构造一个简单模型，并用随机数据测试前向传播
+#     batch_size = 32
+#     seq_length = 50
+#     input_dim = 10
+#
+#     model_dim = 64
+#     num_heads = 4
+#     num_layers = 2
+#     output_dim = 4
+#
+#     model = TimeSeriesTransformer (input_dim=input_dim,
+#                                    model_dim=model_dim,
+#                                    num_heads=num_heads,
+#                                    num_layers=num_layers,
+#                                    dropout=0.1,
+#                                    seq_length=seq_length,
+#                                    output_dim=output_dim)
+#
+#     # 构造随机输入数据，测试模型前向传播
+#     sample_input = torch.randn (batch_size, seq_length, input_dim)
+#     output = model (sample_input)
+#     print ("模型输出形状：", output.shape)  # 期望形状为 [batch_size, output_dim]

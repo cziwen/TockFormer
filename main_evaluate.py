@@ -47,8 +47,7 @@ def evaluate_model_regression_main (test_csv, model_path, scaler_path, bias_corr
 
     # 使用回归评估函数，返回 MSE、R² 等指标
     mse_list, r2_list, preds, targets, _ = model.evaluate_model (test_dataset, batch_size=batch_size,
-                                                                 scaler=scaler, target_indices=target_indices,
-                                                                 fit=False, bias_corrector=bias_corrector)
+                                                                 scaler=scaler, target_indices=target_indices)
     print ("测试集 MSE: ", mse_list)
     print ("测试集 R²: ", r2_list)
 

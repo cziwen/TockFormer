@@ -9,7 +9,6 @@ from torch.utils.data import TensorDataset
 import joblib
 
 from TransformerModel import TimeSeriesTransformer
-from TransformerModel_classify import TimeSeriesTransformer_classify
 from Util import create_sequences, safeLoadCSV, plot_metric
 
 
@@ -74,66 +73,6 @@ def train_model_main (train_csv, val_csv, model_out, scaler_out, bias_corrector_
     plot_metric (mse_list[:, 3], y_label="mse", title="Val MSE", color='green')
     plot_metric (r2_list[:, 3], y_label="r2", title="Val R²", color='blue')
 
-
-def train_model_classification_main (train_csv, val_csv, model_out, batch_size=32, seq_length=32,
-                                     input_dim=33, model_dim=64, num_heads=4, num_layers=2,
-                                     output_dim=3, dropout=0.2, epochs=30, lr=1e-4, patience=5):
-    """
-    修改点：这是针对分类任务的训练主函数
-    假设分类任务的目标列名为 'label'，且标签为整数
-    """
-    print ("=" * 10 + " 初始化分类模型中... " + "=" * 10)
-
-    # 修改点：构造用于分类的模型，output_dim 表示类别数（例如本例中设为 3）
-    model = TimeSeriesTransformer_classify (
-        input_dim=input_dim,
-        model_dim=model_dim,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout=dropout,
-        seq_length=seq_length,
-        output_dim=output_dim
-    )
-
-    print ("=" * 10 + " 加载训练数据中... " + "=" * 10)
-    train_df = safeLoadCSV (pd.read_csv (train_csv))
-    x, y, _, _ = create_sequences (train_df, seq_length=seq_length,
-                                   target_cols=['open_label', 'high_label', 'low_label', 'close_label'], scale=False)
-
-    # 修改点：将标签转换为整数类型（LongTensor）用于交叉熵损失
-    # y = y.long ()
-    train_dataset = TensorDataset (x, y)
-
-    print ("=" * 10 + " 加载验证数据中... " + "=" * 10)
-    val_df = pd.read_csv (val_csv)
-    x_val, y_val, _, _ = create_sequences (val_df, seq_length=seq_length,
-                                           target_cols=['open_label', 'high_label', 'low_label', 'close_label'],
-                                           scale=False)
-    # y_val = y_val.long ()  # 转换标签类型
-    val_dataset = TensorDataset (x_val, y_val)
-
-    print ("=" * 10 + " 开始训练分类模型... " + "=" * 10)
-    # 修改点：调用模型中适用于分类任务的训练函数，不传入 scaler 和 target_indices
-    # 此处假设 TimeSeriesTransformer 内部已实现适用于分类任务的 train_model 方法，
-    # 例如使用 CrossEntropyLoss 及准确率评估指标
-    train_loss, val_accuracy = model.train_model (
-        train_dataset,
-        val_dataset=val_dataset,
-        num_epochs=epochs,
-        batch_size=batch_size,
-        learning_rate=lr,
-        patience=patience
-    )
-
-    # 创建保存目录
-    os.makedirs (os.path.dirname (model_out), exist_ok=True)
-    print ("=" * 10 + " 保存分类模型... " + "=" * 10)
-    torch.save (model.state_dict (), model_out)
-
-    print ("=" * 10 + " 绘图中... " + "=" * 10)
-    # 修改点：绘制训练损失和验证准确率
-    plot_metric (train_loss, y_label="loss", title="Train Loss", color='red')
-    plot_metric (val_accuracy, y_label="accuracy", title="Val Accuracy", color='blue')
 
 
 if __name__ == "__main__":

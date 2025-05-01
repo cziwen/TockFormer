@@ -10,55 +10,113 @@ import requests
 from sklearn.preprocessing import MinMaxScaler
 from datetime import datetime, timedelta
 
+from torch.utils.data import TensorDataset
 
+
+# def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=True):
+#     """
+#     将 DataFrame 数据转换为模型的序列样本。时间会默认排除在外
+#
+#     参数：
+#       - data: pd.DataFrame，包含特征列（数据假设已按时间顺序排列）
+#       - seq_length: 每个序列的长度
+#       - target_cols: 指定用于作为目标的列名，默认为 None，表示使用所有列
+#       - scaler: 可选 MinMaxScaler，用于共享训练数据的缩放器
+#       - scale: 是否进行归一化（默认 True）
+#
+#     返回：
+#       - X_Tensor (samples, seq_length, F)
+#       - y_Tensor (samples, T)
+#       - scaler（MinMaxScaler 实例或 None）
+#       - target_indices（用于 inverse_transform）
+#     """
+#     feature_columns = data.columns.tolist ()[1:]  # 排除第一列时间戳
+#     df_copy = data.copy ()
+#     df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype (np.float32)
+#
+#     # ======== 仅在 scale=True 时执行缩放 ========
+#     if scale:
+#         print ("数据被缩放")
+#         if scaler is None:
+#             scaler = MinMaxScaler (feature_range=(0, 1))
+#             scaler.fit (df_copy.iloc[:, 1:])  # 只 fit 特征列
+#         df_copy.iloc[:, 1:] = scaler.transform (df_copy.iloc[:, 1:]).astype (np.float32)
+#     else:
+#         print ("数据不缩放")
+#         scaler = None  # 不缩放时，不返回 scaler
+#     # ==================================================
+#
+#     data_array = df_copy[feature_columns].values
+#
+#     if target_cols is None:
+#         target_indices = list (range (len (feature_columns)))
+#     elif isinstance (target_cols, str):
+#         target_indices = [df_copy.columns.get_loc (target_cols) - 1]  # -1 因为去掉了时间列
+#     elif isinstance (target_cols, list):
+#         target_indices = [df_copy.columns.get_loc (col) - 1 for col in target_cols]
+#     else:
+#         raise ValueError ("target_cols 参数必须为 None, str 或 list")
+#
+#     X, y = [], []
+#     for i in range (len (data_array) - seq_length):
+#         X.append (data_array[i: i + seq_length])
+#         y.append (data_array[i + seq_length][target_indices])
+#
+#     X_tensor = torch.tensor (np.array (X), dtype=torch.float32)
+#     y_tensor = torch.tensor (np.array (y), dtype=torch.float32)
+#
+#     return X_tensor, y_tensor, scaler, target_indices
 def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=True):
     """
-    将 DataFrame 数据转换为模型的序列样本。时间会默认排除在外
+    将 DataFrame 数据转换为模型的序列样本。时间列默认排除在外。
 
     参数：
-      - data: pd.DataFrame，包含特征列（数据假设已按时间顺序排列）
-      - seq_length: 每个序列的长度
-      - target_cols: 指定用于作为目标的列名，默认为 None，表示使用所有列
-      - scaler: 可选 MinMaxScaler，用于共享训练数据的缩放器
-      - scale: 是否进行归一化（默认 True）
+      - data: pd.DataFrame，已按时间顺序排列，第一列是时间戳
+      - seq_length: 序列长度
+      - target_cols: 用作标签的列名，None 表示所有特征都作为标签
+      - scaler: MinMaxScaler 实例，用于缩放特征
+      - scale: 是否对特征做归一化
 
     返回：
-      - X_Tensor (samples, seq_length, F)
-      - y_Tensor (samples, T)
-      - scaler（MinMaxScaler 实例或 None）
-      - target_indices（用于 inverse_transform）
+      - X_tensor: (样本数, seq_length, 特征数)
+      - y_tensor: (样本数, 目标维度)，保持原始刻度
+      - scaler: 用于缩放特征的 MinMaxScaler（scale=False 时返回 None）
+      - target_indices: 标签在特征向量中的索引列表
     """
-    feature_columns = data.columns.tolist ()[1:]  # 排除第一列时间戳
-    df_copy = data.copy ()
-    df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype (np.float32)
+    # 1. 复制数据，并保留一份 raw 用于取标签
+    feature_columns = data.columns.tolist ()[1:]  # 跳过时间戳列
+    df_scaled = data.copy ()
+    df_raw = data.copy ()
 
-    # ======== 仅在 scale=True 时执行缩放 ========
+    # 2. 只对特征做缩放（不含时间戳）
     if scale:
-        print ("数据被缩放")
         if scaler is None:
             scaler = MinMaxScaler (feature_range=(0, 1))
-            scaler.fit (df_copy.iloc[:, 1:])  # 只 fit 特征列
-        df_copy.iloc[:, 1:] = scaler.transform (df_copy.iloc[:, 1:]).astype (np.float32)
+            scaler.fit (df_scaled.iloc[:, 1:])  # 仅 fit 特征列
+        df_scaled.iloc[:, 1:] = scaler.transform (df_scaled.iloc[:, 1:]).astype (np.float32)
     else:
-        print ("数据不缩放")
-        scaler = None  # 不缩放时，不返回 scaler
-    # ==================================================
+        scaler = None
 
-    data_array = df_copy[feature_columns].values
-
+    # 3. 确定 target 的列索引（去掉时间戳后的位置）
     if target_cols is None:
         target_indices = list (range (len (feature_columns)))
     elif isinstance (target_cols, str):
-        target_indices = [df_copy.columns.get_loc (target_cols) - 1]  # -1 因为去掉了时间列
+        target_indices = [feature_columns.index (target_cols)]
     elif isinstance (target_cols, list):
-        target_indices = [df_copy.columns.get_loc (col) - 1 for col in target_cols]
+        target_indices = [feature_columns.index (col) for col in target_cols]
     else:
-        raise ValueError ("target_cols 参数必须为 None, str 或 list")
+        raise ValueError ("target_cols 必须为 None, str, 或 list")
+
+    # 4. 构造 numpy 数组
+    data_scaled_arr = df_scaled[feature_columns].values
+    data_raw_arr = df_raw[feature_columns].values
 
     X, y = [], []
-    for i in range (len (data_array) - seq_length):
-        X.append (data_array[i: i + seq_length])
-        y.append (data_array[i + seq_length][target_indices])
+    for i in range (len (data_scaled_arr) - seq_length):
+        X.append (data_scaled_arr[i: i + seq_length])
+
+        # 这里的 y 直接取 raw 数值，不需要再 inverse
+        y.append (data_raw_arr[i + seq_length][target_indices])
 
     X_tensor = torch.tensor (np.array (X), dtype=torch.float32)
     y_tensor = torch.tensor (np.array (y), dtype=torch.float32)
@@ -165,6 +223,35 @@ def plot_multiple_curves (accuracy_curve_dict, x_label='period', y_label='Value'
     plt.legend ()
     plt.grid (True)
     plt.show ()
+
+
+def sample_dataset (dataset: TensorDataset,
+                    fraction: float = 0.1,
+                    seed: int = 42) -> TensorDataset:
+    """
+    从一个 TensorDataset 中随机抽取 fraction 比例的样本，返回新的 TensorDataset。
+
+    参数：
+      - dataset: 原始 TensorDataset，内部是 (inputs, targets) 或更多 tensors
+      - fraction: 子集样本占原集的比例，0 < fraction <= 1
+      - seed: 随机种子，保证可复现
+
+    返回：
+      - new_ds: 新的 TensorDataset，其中每个 tensor 都只保留抽样的那些索引
+    """
+    total = len (dataset)
+    subset_size = int (total * fraction)
+    if subset_size < 1:
+        raise ValueError (f"fraction={fraction} 太小，subset_size={subset_size}")
+
+    # 生成随机索引
+    rng = np.random.RandomState (seed)
+    idx = rng.choice (total, size=subset_size, replace=False)
+    idx_tensor = torch.as_tensor (idx, dtype=torch.long)
+
+    # dataset.tensors 是一个 tuple，可能是 (X, y) 或更多
+    sampled_tensors = tuple (tensor[idx_tensor] for tensor in dataset.tensors)
+    return TensorDataset (*sampled_tensors)
 
 
 def safeLoadCSV (df):
@@ -287,12 +374,3 @@ def fetch_latest_agg_data (
     }, inplace=True)
 
     return df[["timestamp", "open", "high", "low", "close", "volume", "vwap"]]
-
-
-symbol = 'SPY'
-API_KEY = "oilTTMMexxTBTmjivaMq3R0Y9ZS1BKbK"
-
-df_min_past = fetch_latest_agg_data (ticker=symbol, timespan="minute", limit=32,
-                                     api_key=API_KEY, delayed=True)
-# df_sec_past = fetch_latest_agg_data (ticker=symbol, timespan="second", limit=32,
-#                                      api_key=API_KEY, delayed=True)

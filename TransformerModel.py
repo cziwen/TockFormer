@@ -311,7 +311,7 @@ class TimeSeriesTransformer (nn.Module):
     def cross_validate (self, dataset, k=5, num_epochs=50,
                         batch_size=32, learning_rate=1e-4,
                         scaler=None, target_indices=None,
-                        patience=10, min_delta=1e-5,
+                        patience=5, min_delta=1e-5,
                         batch_shuffle_threshold=50):
         """
         执行 k 折交叉验证，返回每折的验证 MSE 和 R²。
@@ -380,7 +380,8 @@ def grid_search (model_class, init_args, dataset, param_grid, cv=5,
         )
         # 计算平均 MSE
         mean_mse = np.mean ([np.mean (res['mse']) for res in cv_results])
-        print (f" Avg CV MSE: {mean_mse:.6f}\n")
+        mean_r2 = np.mean ([np.mean (res['r2']) for res in cv_results])
+        print (f" Avg CV MSE: {mean_mse:.6f}, Avg R2: {mean_r2} \n")
         if mean_mse < best_score:
             best_score = mean_mse
             best_params = params

@@ -146,7 +146,7 @@ class TimeSeriesTransformer (nn.Module):
 
         # 逆变换预测值
         preds = self.safe_inverse_transform (preds, scaler, target_indices)
-        # targets = self.safe_inverse_transform (targets, scaler, target_indices) # 不需要inverse 真实值
+        targets = self.safe_inverse_transform (targets, scaler, target_indices)
 
         mse_list = []
         r2_list = []

@@ -2,11 +2,13 @@ import math
 import torch
 import torch.nn as nn
 import copy
+import numpy as np
+
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import KFold, ParameterGrid
 
-from BiasCorrector import *
+from BiasCorrector import BiasCorrector
 
 
 class PositionalEncoding (nn.Module):
@@ -102,13 +104,18 @@ class TimeSeriesTransformer (nn.Module):
     def safe_inverse_transform (self, preds, scaler, target_indices):
         """
         仅对目标列进行逆缩放
+
+        参数：
+            - preds: 预测值数组(scaled)
+            - scaler: 用于逆缩放的 scaler
+            - target_indices: 目标列索引
         """
         preds_inv = preds.copy ()
         for i, col_idx in enumerate (target_indices):
             preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
         return preds_inv
 
-    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3]):
+    def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3], bias_corrector=None):
         """
         在验证集上评估模型，计算各目标特征的 MSE 和 R²，并返回逆缩放后的预测值和真实值
 
@@ -147,6 +154,12 @@ class TimeSeriesTransformer (nn.Module):
         # 逆变换预测值
         preds = self.safe_inverse_transform (preds, scaler, target_indices)
         targets = self.safe_inverse_transform (targets, scaler, target_indices)
+
+        # 如果传入 bias_corrector，则进行偏移校正
+        if bias_corrector is not None:
+            preds = bias_corrector.transform (preds)
+
+
 
         mse_list = []
         r2_list = []

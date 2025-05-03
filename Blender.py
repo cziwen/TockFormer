@@ -99,4 +99,4 @@ class MLPBlender(nn.Module):
         contrib = np.array(contrib)
         if contrib.sum() > 0:
             contrib = contrib / contrib.sum()
-        return {f"model_{i}": float(contrib[i]) for i in range(M)}
+        return {f"model_{self.base_models[i].__class__.__name__}": float(contrib[i]) for i in range(M)}

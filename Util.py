@@ -11,6 +11,22 @@ from datetime import datetime, timedelta
 
 from torch.utils.data import TensorDataset
 
+
+def split_time_series(df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-5, "Ratios must sum to 1"
+
+    n = len(df)
+    train_end = int(n * train_ratio)
+    val_end = train_end + int(n * val_ratio)
+
+    df_train = df.iloc[:train_end].reset_index(drop=True)
+    df_val   = df.iloc[train_end:val_end].reset_index(drop=True)
+    df_test  = df.iloc[val_end:].reset_index(drop=True)
+
+    return df_train, df_val, df_test
+
+
+    
 def grid_search (model_class, init_args, dataset, param_grid, cv=5,
                  scaler=None, target_indices=None):
     """

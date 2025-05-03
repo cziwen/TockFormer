@@ -1,11 +1,9 @@
-from typing import Optional
-
 import pandas as pd
 import numpy as np
-import pytz
 import torch
 import matplotlib.pyplot as plt
 import requests
+import time
 
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import KFold, ParameterGrid
@@ -220,3 +218,82 @@ def safe_inverse_transform (preds, scaler, target_indices):
         preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
     return preds_inv
 
+
+def fetch_stock_data_finnhub_paginated(
+    symbol,
+    start_date,
+    end_date,
+    interval='1',
+    token='YOUR_API_KEY',
+    chunk_days=7,
+    verbose=False
+):
+    """
+    分段拉取分钟/小时级别数据（1min~60min），自动拼接为完整 DataFrame。
+
+    参数：
+      - symbol: 股票代码，如 'AAPL'
+      - start_date, end_date: 'YYYY-MM-DD' 字符串
+      - interval: '1', '5', '15', '30', '60'（单位：分钟）
+      - token: Finnhub API token
+      - chunk_days: 每次请求的时间范围（天数），建议 5~15 天
+      - verbose: 是否输出每个分段请求的信息
+
+    返回：
+      - pandas.DataFrame（时间顺序排列）
+    """
+
+    resolution_map = {'1': '1', '5': '5', '15': '15', '30': '30', '60': '60'}
+    if interval not in resolution_map:
+        raise ValueError(f"Unsupported interval: {interval}")
+
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+    url = 'https://finnhub.io/api/v1/stock/candle'
+
+    all_chunks = []
+
+    current_dt = start_dt
+    while current_dt < end_dt:
+        next_dt = min(current_dt + timedelta(days=chunk_days), end_dt)
+
+        from_ts = int(time.mktime(current_dt.timetuple()))
+        to_ts = int(time.mktime(next_dt.timetuple()))
+
+        params = {
+            'symbol': symbol,
+            'resolution': resolution_map[interval],
+            'from': from_ts,
+            'to': to_ts,
+            'token': token
+        }
+
+        r = requests.get(url, params=params)
+        data = r.json()
+
+        if verbose:
+            print(f"Fetching {current_dt.date()} to {next_dt.date()}... Status: {data.get('s')}")
+
+        if data.get('s') != 'ok':
+            current_dt = next_dt
+            continue
+
+        df = pd.DataFrame({
+            'timestamp': pd.to_datetime(data['t'], unit='s'),
+            'open': data['o'],
+            'high': data['h'],
+            'low': data['l'],
+            'close': data['c'],
+            'volume': data['v']
+        })
+        all_chunks.append(df)
+
+        current_dt = next_dt
+        time.sleep(0.3)  # 避免触发速率限制
+
+    if not all_chunks:
+        raise Exception("No data retrieved. Try adjusting time window or check token/symbol.")
+
+    full_df = pd.concat(all_chunks).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    return full_df

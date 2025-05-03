@@ -14,14 +14,13 @@ class TimeSeriesLSTM(nn.Module):
     基于 LSTM 的时间序列预测模型
     """
 
-    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.1, seq_length=100, output_dim=1, bidirectional=False):
+    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.1, output_dim=1, bidirectional=False):
         """
         参数：
         - input_dim: 输入特征的维度
         - hidden_dim: LSTM 隐层维度
         - num_layers: LSTM 层数
         - dropout: dropout 概率
-        - seq_length: 序列最大长度（用于可能的序列处理）
         - output_dim: 模型输出的维度
         - bidirectional: 是否双向 LSTM
         """

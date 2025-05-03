@@ -8,10 +8,50 @@ import matplotlib.pyplot as plt
 import requests
 
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import KFold, ParameterGrid
 from datetime import datetime, timedelta
 
 from torch.utils.data import TensorDataset
 
+def grid_search (model_class, init_args, dataset, param_grid, cv=5,
+                 scaler=None, target_indices=None):
+    """
+    对架构超参数进行网格搜索，使用交叉验证选择最优配置。
+
+    参数:
+      - model_class: TimeSeriesTransformer 类
+      - init_args: dict, 除了可调超参外的固定初始化参数，例如 {'input_dim':49,'output_dim':4,'seq_length':100,'dropout':0.1}
+      - dataset: 完整数据集, TensorDataset(input, label)
+      - param_grid: dict, key 为模型初始化参数名（如 'model_dim','num_heads','num_layers'），value 为列表
+      - cv: 折数
+      - scaler, target_indices: 同前
+
+    返回:
+      - best_params: 最佳参数组合（仅包含可调参数）
+      - best_score: 对应的平均 MSE
+    """
+    best_score = float ('inf')
+    best_params = None
+    for params in ParameterGrid (param_grid):
+        print (f"Testing architecture params: {params}")
+        # 合并固定参数与可调参数，重新实例化模型
+        model_kwargs = {**init_args, **params}
+        model = model_class (**model_kwargs)
+        # 使用默认训练配置进行 CV
+        cv_results = model.cross_validate (
+            dataset,
+            k=cv,
+            scaler=scaler,
+            target_indices=target_indices
+        )
+        # 计算平均 MSE
+        mean_mse = np.mean ([np.mean (res['mse']) for res in cv_results])
+        mean_r2 = np.mean ([np.mean (res['r2']) for res in cv_results])
+        print (f" Avg CV MSE: {mean_mse:.6f}, Avg R2: {mean_r2} \n")
+        if mean_mse < best_score:
+            best_score = mean_mse
+            best_params = params
+    return best_params, best_score
 
 def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=True):
     """
@@ -67,47 +107,6 @@ def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=Tru
 
     return X_tensor, y_tensor, scaler, target_indices
 
-
-def create_prediction_sequence (data, seq_length, scaler, target_col):
-    """
-    将 DataFrame 数据转换为预测序列样本，仅返回 X_tensor 和 target_indices。
-    假设第一列为时间戳，其余列为特征，使用传入的 scaler 对特征进行归一化。
-
-    参数：
-      - data: pd.DataFrame，已按时间顺序排列，第一列为时间戳
-      - seq_length: 输入序列长度
-      - scaler: 已 fit 的 MinMaxScaler，用于归一化
-      - target_col: 单个列名或列名列表，用于后续逆缩放预测值
-
-    返回：
-      - X_tensor: torch.Tensor，形状为 [1, seq_length, F]
-      - target_indices: List[int]，在 scaler 中对应的目标列索引
-    """
-    # 提取特征列名（排除时间戳）
-    feature_columns = data.columns.tolist ()[1:]
-    df_copy = data.copy ()
-    df_copy[df_copy.columns[1:]] = df_copy[df_copy.columns[1:]].astype (np.float32)
-
-    # 执行归一化
-    df_copy.iloc[:, 1:] = scaler.transform (df_copy.iloc[:, 1:]).astype (np.float32)
-    data_array = df_copy[feature_columns].values
-
-    if len (data_array) < seq_length:
-        raise ValueError ("数据长度小于序列长度")
-
-    # 构造输入序列
-    X = data_array[-seq_length:]
-    X_tensor = torch.tensor (X, dtype=torch.float32).unsqueeze (0)  # [1, seq_length, F]
-
-    # 获取 target_indices（在 scaler 特征中的列位置）
-    if isinstance (target_col, str):
-        target_indices = [df_copy.columns.get_loc (target_col) - 1]  # -1 是因为排除了时间戳
-    elif isinstance (target_col, list):
-        target_indices = [df_copy.columns.get_loc (col) - 1 for col in target_col]
-    else:
-        raise ValueError ("target_col 必须是字符串或字符串列表")
-
-    return X_tensor, target_indices
 
 
 def plot_metric (values, y_label='Value', title='Training Metric', color='blue', show=True):
@@ -207,114 +206,17 @@ def safeLoadCSV (df):
 
     return df
 
-
-def display_prediction (pred, base_time=None, resolution_minutes=5):
+def safe_inverse_transform (preds, scaler, target_indices):
     """
-    美观打印模型预测的 OHLC 价格。
+    仅对目标列进行逆缩放
 
     参数：
-      - pred: numpy array 或 list，形状为 [1, 4]，包含预测的 open, high, low, close
-      - base_time: datetime，可选，预测基准时间，若为 None 则使用当前时间
-      - resolution_minutes: int，预测步长的分钟数，默认为 5 分钟
-
-    输出：
-      - 美观的预测信息打印
+        - preds: 预测值数组(scaled)
+        - scaler: 用于逆缩放的 scaler
+        - target_indices: 目标列索引
     """
-    # 处理时间
-    if base_time is None:
-        base_time = datetime.now ()
-    prediction_time = base_time + timedelta (minutes=resolution_minutes)
+    preds_inv = preds.copy ()
+    for i, col_idx in enumerate (target_indices):
+        preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
+    return preds_inv
 
-    # 处理预测值
-    pred = pred.flatten ()
-    price_dict = {
-        "open": round (pred[0], 4),
-        "high": round (pred[1], 4),
-        "low": round (pred[2], 4),
-        "close": round (pred[3], 4),
-    }
-
-    # 打印
-    print ("=" * 40)
-    print (f"📅 预测时间：{prediction_time.strftime ('%Y-%m-%d %H:%M:%S')}")
-    print ("📈 预测价格（单位：USD）：")
-    for k, v in price_dict.items ():
-        print (f"  • {k:<6}: {v:.2f}")
-    print ("=" * 40)
-
-
-def fetch_latest_agg_data (
-        ticker: str,
-        timespan: str = "second",
-        limit: int = 10,
-        api_key: str = "your_api_key",
-        delayed: bool = False
-) -> Optional[pd.DataFrame]:
-    """
-    获取最新 N 条聚合数据，支持 Free Plan（15分钟延迟数据）。
-
-    参数:
-        ticker: 股票代码
-        timespan: 聚合周期（second, minute, hour, day）
-        limit: 返回条数
-        api_key: Polygon API Key
-        delayed: 如果为 True，则使用美国东部时间，并回退 15 分钟
-
-    返回:
-        聚合数据 DataFrame，包含 timestamp, open, high, low, close, volume, vwap
-    """
-    eastern = pytz.timezone ("America/New_York")
-    now_et = datetime.now (eastern)
-
-    if delayed:
-        to_time = now_et - timedelta (minutes=15)
-        print (f"⚠ 使用延迟数据模式，to_time（纽约时间）= {to_time}")
-    else:
-        to_time = now_et
-
-    # 计算 from_time
-    if timespan == "second":
-        from_time = to_time - timedelta (seconds=limit)
-    elif timespan == "minute":
-        from_time = to_time - timedelta (minutes=limit)
-    elif timespan == "hour":
-        from_time = to_time - timedelta (hours=limit)
-    elif timespan == "day":
-        from_time = to_time - timedelta (days=limit)
-    else:
-        raise ValueError (f"Unsupported timespan: {timespan}")
-
-    # 转换为 ISO 格式（UTC 时间，Polygon 接收 ISO8601）
-    from_utc = from_time.astimezone (pytz.utc).strftime ("%Y-%m-%dT%H:%M:%S")
-    to_utc = to_time.astimezone (pytz.utc).strftime ("%Y-%m-%dT%H:%M:%S")
-
-    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/{timespan}/{from_utc}/{to_utc}"
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": limit,
-        "apiKey": api_key
-    }
-
-    response = requests.get (url, params=params)
-    if response.status_code != 200:
-        print (f"请求失败: {response.status_code} - {response.text}")
-        return None
-
-    results = response.json ().get ("results", [])
-    if not results:
-        print ("未获取到聚合数据")
-        return None
-
-    df = pd.DataFrame (results)
-    df["timestamp"] = pd.to_datetime (df["t"], unit="ms")
-    df.rename (columns={
-        "o": "open",
-        "h": "high",
-        "l": "low",
-        "c": "close",
-        "v": "volume",
-        "vw": "vwap"
-    }, inplace=True)
-
-    return df[["timestamp", "open", "high", "low", "close", "volume", "vwap"]]

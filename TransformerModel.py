@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import KFold, ParameterGrid
 
+from Util import safe_inverse_transform
+
 from BiasCorrector import BiasCorrector
 
 
@@ -101,19 +103,19 @@ class TimeSeriesTransformer (nn.Module):
 
         return out
 
-    def safe_inverse_transform (self, preds, scaler, target_indices):
-        """
-        仅对目标列进行逆缩放
+    # def safe_inverse_transform (self, preds, scaler, target_indices):
+    #     """
+    #     仅对目标列进行逆缩放
 
-        参数：
-            - preds: 预测值数组(scaled)
-            - scaler: 用于逆缩放的 scaler
-            - target_indices: 目标列索引
-        """
-        preds_inv = preds.copy ()
-        for i, col_idx in enumerate (target_indices):
-            preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
-        return preds_inv
+    #     参数：
+    #         - preds: 预测值数组(scaled)
+    #         - scaler: 用于逆缩放的 scaler
+    #         - target_indices: 目标列索引
+    #     """
+    #     preds_inv = preds.copy ()
+    #     for i, col_idx in enumerate (target_indices):
+    #         preds_inv[:, i] = preds[:, i] * scaler.data_range_[col_idx] + scaler.data_min_[col_idx]
+    #     return preds_inv
 
     def evaluate_model (self, dataset, batch_size=32, scaler=None, target_indices=[0, 1, 2, 3], bias_corrector=None):
         """
@@ -152,8 +154,8 @@ class TimeSeriesTransformer (nn.Module):
         targets = np.concatenate (targets, axis=0).astype (np.float32)
 
         # 逆变换预测值
-        preds = self.safe_inverse_transform (preds, scaler, target_indices)
-        targets = self.safe_inverse_transform (targets, scaler, target_indices)
+        preds = safe_inverse_transform (preds, scaler, target_indices)
+        targets = safe_inverse_transform (targets, scaler, target_indices)
 
         # 如果传入 bias_corrector，则进行偏移校正
         if bias_corrector is not None:
@@ -265,14 +267,14 @@ class TimeSeriesTransformer (nn.Module):
                                                                target_indices=target_indices)
                 val_mse_lists.append (mse_list)
                 val_r2_lists.append (r2_list)
-
-                best_avg_mse = np.mean (mse_list)
+                avg_mse = np.mean (mse_list)
+                
                 if log:
                     print (f"Epoch {epoch + 1}/{num_epochs}, Val MSEs: {mse_list}, R²: {r2_list}")
 
                 # 如果当前验证指标比之前更好，则保存模型参数
-                if best_avg_mse + min_delta < best_val_mse:
-                    best_val_mse = best_avg_mse
+                if avg_mse + min_delta < best_val_mse:
+                    best_val_mse = avg_mse
                     epochs_no_improve = 0
                     best_model_state = copy.deepcopy (self.state_dict ())  # 保存最佳模型参数
                 else:
@@ -313,7 +315,7 @@ class TimeSeriesTransformer (nn.Module):
         pred = pred.detach ().cpu ().numpy ().astype (np.float32)
 
         # 逆归一化（安全逆变换），使预测结果恢复到原始数值域
-        pred_inv = self.safe_inverse_transform (pred, scaler, target_indices)
+        pred_inv = safe_inverse_transform (pred, scaler, target_indices)
 
         # 如果传入 bias_corrector，则进行 bias 校正
         if bias_corrector is not None:
@@ -360,45 +362,45 @@ class TimeSeriesTransformer (nn.Module):
         return results
 
 
-def grid_search (model_class, init_args, dataset, param_grid, cv=5,
-                 scaler=None, target_indices=None):
-    """
-    对架构超参数进行网格搜索，使用交叉验证选择最优配置。
+# def grid_search (model_class, init_args, dataset, param_grid, cv=5,
+#                  scaler=None, target_indices=None):
+#     """
+#     对架构超参数进行网格搜索，使用交叉验证选择最优配置。
 
-    参数:
-      - model_class: TimeSeriesTransformer 类
-      - init_args: dict, 除了可调超参外的固定初始化参数，例如 {'input_dim':49,'output_dim':4,'seq_length':100,'dropout':0.1}
-      - dataset: 完整数据集, TensorDataset(input, label)
-      - param_grid: dict, key 为模型初始化参数名（如 'model_dim','num_heads','num_layers'），value 为列表
-      - cv: 折数
-      - scaler, target_indices: 同前
+#     参数:
+#       - model_class: TimeSeriesTransformer 类
+#       - init_args: dict, 除了可调超参外的固定初始化参数，例如 {'input_dim':49,'output_dim':4,'seq_length':100,'dropout':0.1}
+#       - dataset: 完整数据集, TensorDataset(input, label)
+#       - param_grid: dict, key 为模型初始化参数名（如 'model_dim','num_heads','num_layers'），value 为列表
+#       - cv: 折数
+#       - scaler, target_indices: 同前
 
-    返回:
-      - best_params: 最佳参数组合（仅包含可调参数）
-      - best_score: 对应的平均 MSE
-    """
-    best_score = float ('inf')
-    best_params = None
-    for params in ParameterGrid (param_grid):
-        print (f"Testing architecture params: {params}")
-        # 合并固定参数与可调参数，重新实例化模型
-        model_kwargs = {**init_args, **params}
-        model = model_class (**model_kwargs)
-        # 使用默认训练配置进行 CV
-        cv_results = model.cross_validate (
-            dataset,
-            k=cv,
-            scaler=scaler,
-            target_indices=target_indices
-        )
-        # 计算平均 MSE
-        mean_mse = np.mean ([np.mean (res['mse']) for res in cv_results])
-        mean_r2 = np.mean ([np.mean (res['r2']) for res in cv_results])
-        print (f" Avg CV MSE: {mean_mse:.6f}, Avg R2: {mean_r2} \n")
-        if mean_mse < best_score:
-            best_score = mean_mse
-            best_params = params
-    return best_params, best_score
+#     返回:
+#       - best_params: 最佳参数组合（仅包含可调参数）
+#       - best_score: 对应的平均 MSE
+#     """
+#     best_score = float ('inf')
+#     best_params = None
+#     for params in ParameterGrid (param_grid):
+#         print (f"Testing architecture params: {params}")
+#         # 合并固定参数与可调参数，重新实例化模型
+#         model_kwargs = {**init_args, **params}
+#         model = model_class (**model_kwargs)
+#         # 使用默认训练配置进行 CV
+#         cv_results = model.cross_validate (
+#             dataset,
+#             k=cv,
+#             scaler=scaler,
+#             target_indices=target_indices
+#         )
+#         # 计算平均 MSE
+#         mean_mse = np.mean ([np.mean (res['mse']) for res in cv_results])
+#         mean_r2 = np.mean ([np.mean (res['r2']) for res in cv_results])
+#         print (f" Avg CV MSE: {mean_mse:.6f}, Avg R2: {mean_r2} \n")
+#         if mean_mse < best_score:
+#             best_score = mean_mse
+#             best_params = params
+#     return best_params, best_score
 
 
 # ===== 测试部分 =====

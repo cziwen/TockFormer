@@ -113,6 +113,8 @@ class TimeSeriesLSTM(nn.Module):
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
+        print (f"Using device: {device}")
+
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=1e-5)
@@ -173,6 +175,10 @@ class TimeSeriesLSTM(nn.Module):
                             print(f"Early stopping at epoch {epoch+1}")
                         self.load_state_dict(best_state)
                         break
+        
+
+        self.load_state_dict (best_model_state) # 回溯到最优模型
+
         return train_losses, val_mses, val_r2s
 
     def predict_model(self, X_tensor, scaler=None, bias_corrector=None, target_indices=None):

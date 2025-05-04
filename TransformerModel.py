@@ -288,10 +288,11 @@ class TimeSeriesTransformer (nn.Module):
 
         if not early_stop:
             print ("Training finished without early stopping.")
+            self.load_state_dict (best_model_state)  # 恢复到最佳模型参数
 
         return train_losses, val_mse_lists, val_r2_lists
 
-    def predict_model (self, X_tensor, scaler, bias_corrector, target_indices):
+    def predict_model (self, X_tensor, scaler, bias_corrector=None, target_indices):
         """
         使用模型进行预测，并对预测结果进行逆归一化。
         输入 X_tensor 的形状应为 [1, seq_length, input_dim]，

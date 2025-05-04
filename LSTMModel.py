@@ -177,13 +177,13 @@ class TimeSeriesLSTM(nn.Module):
                         break
         
 
-        self.load_state_dict (best_model_state) # 回溯到最优模型
+        self.load_state_dict (best_state) # 回溯到最优模型
 
         return train_losses, val_mses, val_r2s
 
     def predict_model(self, X_tensor, scaler=None, bias_corrector=None, target_indices=None):
         """
-        单样本预测与逆缩放
+        样本预测与逆缩放
         """
         self.eval()
         device = next(self.parameters()).device

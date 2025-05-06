@@ -97,17 +97,19 @@ def add_factors (df):
     :param df: 包含至少 open, high, low, close, volume 列的 DataFrame
     :return: 新增因子后的 DataFrame
     """
+
+    # VWAP 因子 （不包括 open）
+    if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
+
+
     # 趋势指标 - 对价格计算 EMA
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[f'EMA5_{col}'] = df[col].ewm (span=5, adjust=False).mean ()
             df[f'EMA10_{col}'] = df[col].ewm (span=10, adjust=False).mean ()
             df[f'EMA20_{col}'] = df[col].ewm (span=20, adjust=False).mean ()
-
-    # VWAP 因子 （不包括 open）
-    # if all (col in df.columns for col in ['high', 'low', 'close', 'volume']):
-    #     typical_price = (df['high'] + df['low'] + df['close']) / 3
-    #     df['vwap'] = (typical_price * df['volume']).cumsum () / df['volume'].cumsum ()
 
     # 动量指标 - 对价格计算 RSI, MACD, ROC，下一个时间的百分比变化
     for col in ['open', 'high', 'low', 'close']:

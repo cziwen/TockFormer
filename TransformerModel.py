@@ -292,7 +292,7 @@ class TimeSeriesTransformer (nn.Module):
 
         return train_losses, val_mse_lists, val_r2_lists
 
-    def predict_model (self, X_tensor, scaler, bias_corrector=None, target_indices = None):
+    def predict_model (self, X_tensor, scaler=None, bias_corrector=None, target_indices = None):
         """
         使用模型进行预测，并对预测结果进行逆归一化。
         输入 X_tensor 的形状应为 [n, seq_length, input_dim]，
@@ -316,13 +316,14 @@ class TimeSeriesTransformer (nn.Module):
         pred = pred.detach ().cpu ().numpy ().astype (np.float32)
 
         # 逆归一化（安全逆变换），使预测结果恢复到原始数值域
-        pred_inv = safe_inverse_transform (pred, scaler, target_indices)
+        if target_indices is not None and scaler is not None:
+            pred = safe_inverse_transform (pred, scaler, target_indices)
 
         # 如果传入 bias_corrector，则进行 bias 校正
         if bias_corrector is not None:
-            pred_inv = bias_corrector.transform (pred_inv)
+            pred = bias_corrector.transform (pred_inv)
 
-        return pred_inv
+        return pred
 
     def cross_validate (self, dataset, k=5, num_epochs=50,
                         batch_size=32, learning_rate=1e-4,

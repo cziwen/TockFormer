@@ -5,28 +5,31 @@ import matplotlib.pyplot as plt
 import requests
 import time
 
+from scipy.stats import spearmanr
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import KFold, ParameterGrid
 from datetime import datetime, timedelta
 
+from tqdm import tqdm
+
+
 from torch.utils.data import TensorDataset
 
 
-def split_time_series(df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
-    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-5, "Ratios must sum to 1"
+def split_time_series (df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+    assert abs (train_ratio + val_ratio + test_ratio - 1.0) < 1e-5, "Ratios must sum to 1"
 
-    n = len(df)
-    train_end = int(n * train_ratio)
-    val_end = train_end + int(n * val_ratio)
+    n = len (df)
+    train_end = int (n * train_ratio)
+    val_end = train_end + int (n * val_ratio)
 
-    df_train = df.iloc[:train_end].reset_index(drop=True)
-    df_val   = df.iloc[train_end:val_end].reset_index(drop=True)
-    df_test  = df.iloc[val_end:].reset_index(drop=True)
+    df_train = df.iloc[:train_end].reset_index (drop=True)
+    df_val = df.iloc[train_end:val_end].reset_index (drop=True)
+    df_test = df.iloc[val_end:].reset_index (drop=True)
 
     return df_train, df_val, df_test
 
 
-    
 def grid_search (model_class, init_args, dataset, param_grid, cv=5,
                  scaler=None, target_indices=None):
     """
@@ -66,6 +69,7 @@ def grid_search (model_class, init_args, dataset, param_grid, cv=5,
             best_score = mean_mse
             best_params = params
     return best_params, best_score
+
 
 def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=True):
     """
@@ -120,7 +124,6 @@ def create_sequences (data, seq_length, target_cols=None, scaler=None, scale=Tru
     y_tensor = torch.tensor (np.array (y), dtype=torch.float32)
 
     return X_tensor, y_tensor, scaler, target_indices
-
 
 
 def plot_metric (values, y_label='Value', title='Training Metric', color='blue', show=True):
@@ -220,6 +223,7 @@ def safeLoadCSV (df):
 
     return df
 
+
 def safe_inverse_transform (preds, scaler, target_indices):
     """
     仅对目标列进行逆缩放
@@ -235,14 +239,14 @@ def safe_inverse_transform (preds, scaler, target_indices):
     return preds_inv
 
 
-def fetch_stock_data_finnhub_paginated(
-    symbol,
-    start_date,
-    end_date,
-    interval='1',
-    token='YOUR_API_KEY',
-    chunk_days=7,
-    verbose=False
+def fetch_stock_data_finnhub_paginated (
+        symbol,
+        start_date,
+        end_date,
+        interval='1',
+        token='YOUR_API_KEY',
+        chunk_days=7,
+        verbose=False
 ):
     """
     分段拉取分钟/小时级别数据（1min~60min），自动拼接为完整 DataFrame。
@@ -261,10 +265,10 @@ def fetch_stock_data_finnhub_paginated(
 
     resolution_map = {'1': '1', '5': '5', '15': '15', '30': '30', '60': '60'}
     if interval not in resolution_map:
-        raise ValueError(f"Unsupported interval: {interval}")
+        raise ValueError (f"Unsupported interval: {interval}")
 
-    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    start_dt = datetime.strptime (start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime (end_date, '%Y-%m-%d')
 
     url = 'https://finnhub.io/api/v1/stock/candle'
 
@@ -272,10 +276,10 @@ def fetch_stock_data_finnhub_paginated(
 
     current_dt = start_dt
     while current_dt < end_dt:
-        next_dt = min(current_dt + timedelta(days=chunk_days), end_dt)
+        next_dt = min (current_dt + timedelta (days=chunk_days), end_dt)
 
-        from_ts = int(time.mktime(current_dt.timetuple()))
-        to_ts = int(time.mktime(next_dt.timetuple()))
+        from_ts = int (time.mktime (current_dt.timetuple ()))
+        to_ts = int (time.mktime (next_dt.timetuple ()))
 
         params = {
             'symbol': symbol,
@@ -285,31 +289,134 @@ def fetch_stock_data_finnhub_paginated(
             'token': token
         }
 
-        r = requests.get(url, params=params)
-        data = r.json()
+        r = requests.get (url, params=params)
+        data = r.json ()
 
         if verbose:
-            print(f"Fetching {current_dt.date()} to {next_dt.date()}... Status: {data.get('s')}")
+            print (f"Fetching {current_dt.date ()} to {next_dt.date ()}... Status: {data.get ('s')}")
 
-        if data.get('s') != 'ok':
+        if data.get ('s') != 'ok':
             current_dt = next_dt
             continue
 
-        df = pd.DataFrame({
-            'timestamp': pd.to_datetime(data['t'], unit='s'),
+        df = pd.DataFrame ({
+            'timestamp': pd.to_datetime (data['t'], unit='s'),
             'open': data['o'],
             'high': data['h'],
             'low': data['l'],
             'close': data['c'],
             'volume': data['v']
         })
-        all_chunks.append(df)
+        all_chunks.append (df)
 
         current_dt = next_dt
-        time.sleep(0.3)  # 避免触发速率限制
+        time.sleep (0.3)  # 避免触发速率限制
 
     if not all_chunks:
-        raise Exception("No data retrieved. Try adjusting time window or check token/symbol.")
+        raise Exception ("No data retrieved. Try adjusting time window or check token/symbol.")
 
-    full_df = pd.concat(all_chunks).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    full_df = pd.concat (all_chunks).drop_duplicates ('timestamp').sort_values ('timestamp').reset_index (drop=True)
     return full_df
+
+
+
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+def _compute_metric_for_series (
+        name: str,
+        ic_global: float,
+        series_rank: pd.Series,
+        rank_ret: pd.Series,
+        window: int | None
+) -> dict:
+    """
+    Compute global IC and (if window>1) sliding-window IC/IR for one series.
+    """
+    rec = {'factor': name, 'ic_global': float (ic_global)}
+    if window and window > 1:
+        # rolling Pearson on ranks == Spearman
+        ic_sw = series_rank.rolling (window).corr (rank_ret)
+        mu = ic_sw.mean (skipna=True)
+        sigma = ic_sw.std (ddof=0, skipna=True)
+        rec.update ({
+            'ic_sw_mean': float (mu),
+            'ic_sw_std': float (sigma),
+            'ir_sw': float (mu / sigma) if sigma else np.nan,
+        })
+    return rec
+
+
+def evaluate_time_series_ic (
+        df: pd.DataFrame,
+        factors: list[str],
+        target_col: str,
+        forward: int = 1,
+        date_col: str = "timestamp",
+        window: int | None = None,
+        n_jobs: int | None = None
+) -> pd.DataFrame:
+    """
+    多进程并行的单标的时间序列因子 IC & IR（带 Composite）计算
+
+    Args:
+      df: 原始数据，需含 [date_col, target_col] + factors。
+      factors: 因子名列表。
+      target_col: 价格列（如 'close'）。
+      forward: 向后看几个 timestamp 的收益。
+      date_col: 时间戳列名。
+      window: 若指定 (>1)，就做长度为 window 的滑动 Spearman 计算。
+      n_jobs: 并行进程数，None 表示使用所有可用 CPU 核心。
+
+    Returns:
+      pd.DataFrame: index 为 factor（含 composite），列含
+        ic_global, ic_sw_mean, ic_sw_std, ir_sw（若 window>1）。
+    """
+    # 1) 准备数据
+    df = df.sort_values (date_col).copy ()
+    df['forward_ret'] = df[target_col].shift (-forward) / df[target_col] - 1
+    df = df.dropna (subset=factors + ['forward_ret'])
+
+    # 2) Rank-transform factors + forward_ret
+    cols = factors + ['forward_ret']
+    df_rank = df[cols].rank (method='average')
+    rank_ret = df_rank['forward_ret']
+
+    # 3) 全局 IC for each factor
+    ic_global: dict = df_rank[factors].corrwith (rank_ret).to_dict ()
+
+    # 4) Composite 因子
+    means = df[factors].mean ()
+    stds = df[factors].std (ddof=0)
+    df['composite'] = ((df[factors] - means) / stds).sum (axis=1)
+    comp_rank = df['composite'].rank (method='average')
+    ic_global['composite'] = comp_rank.corr (rank_ret)
+
+    # 5) Prepare rank series mapping
+    series_ranks = {f: df_rank[f] for f in factors}
+    series_ranks['composite'] = comp_rank
+
+    # 6) 并行计算每个因子的指标
+    records = []
+    with ProcessPoolExecutor (max_workers=n_jobs) as executor:
+        futures = {
+            executor.submit (
+                _compute_metric_for_series,
+                name,
+                ic_global[name],
+                series_ranks[name],
+                rank_ret,
+                window
+            ): name
+            for name in series_ranks
+        }
+        for fut in as_completed (futures):
+            records.append (fut.result ())
+
+    # 7) 构造结果 DataFrame
+    result = pd.DataFrame (records).set_index ('factor')
+    # 保证列顺序
+    cols_out = ['ic_global']
+    if window and window > 1:
+        cols_out += ['ic_sw_mean', 'ic_sw_std', 'ir_sw']
+    return result[cols_out]

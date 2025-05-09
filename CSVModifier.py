@@ -203,7 +203,7 @@ def clean_outliers (df, columns=None, z_thresh=5, show_msg=False):
                     break
 
             if left is not None and right is not None:
-                series[i] = (left + right) / 2
+                series[i] = int((left + right) / 2)
                 total_replaced += 1
             else:
                 series[i] = np.nan  # 标记为 NaN，之后统一 drop

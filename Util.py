@@ -372,8 +372,15 @@ def evaluate_time_series_ic (
       pd.DataFrame: index 为 factor（含 composite），列含
         ic_global, ic_sw_mean, ic_sw_std, ir_sw（若 window>1）。
     """
+
+    # 过滤 factors
+    # Drop non-numeric factors like timestamp
+    factors = [f for f in factors if pd.api.types.is_numeric_dtype (df[f])]
+
     # 1) 准备数据
-    df = df.sort_values (date_col).copy ()
+    df = df.copy ()
+    df[date_col] = pd.to_datetime (df[date_col])  # ← 添加这行确保时间正确排序
+    df = df.sort_values (date_col)
     df['forward_ret'] = df[target_col].shift (-forward) / df[target_col] - 1
     df = df.dropna (subset=factors + ['forward_ret'])
 

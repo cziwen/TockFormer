@@ -43,7 +43,7 @@ class FactorFactory:
         for name, meta in FACTOR_REGISTRY.items():
             fn = meta['func']
             tag = meta['tag']
-            # skip price-based when include_price_factors False and tag == 'price'
+            # skip price-based when include_bounded_factors False and tag == 'price'
             if not include_bounded_factors and getattr(fn, 'price_factor', False):
                 continue
             out = fn(self, df_in)

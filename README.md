@@ -44,9 +44,13 @@ Users can analyze or process the resulting CSVs as needed.
 ```bash
 python launcher.py \
       --script Utility/AggrData.py \
-      --start "2025-05-14 16:39:00" \
-      --end   "2025-05-15 16:00:00"
+      --start "2025-05-04 03:00:00" \
+      --end   "2025-05-04 21:00:00"
 ```
+> ###### Why use --start and --end ? 
+> Finnhub’s historical tick data endpoint only returns data up to the end of a trading day, and the final data for the day is typically only available after 8:00 PM US Eastern Time (during Daylight Saving Time).
+> 
+> ###### To ensure complete data retrieval, I recommend scheduling the launcher.py script to run at 3:00 AM Eastern Time the following day. This timing guarantees that all tick data for the previous trading day is fully accessible.
 
 ## 🖥️ Legacy Scripts
 

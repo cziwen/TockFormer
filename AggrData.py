@@ -19,22 +19,23 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 # 从Util导入需要的函数
-from Util import fetch_stock_data_finnhub_paginated, safeLoadCSV
+from Util import safeLoadCSV
+from DataRequest import fetch_candle_data
 
 # ---------------------------------------- 配置参数 ----------------------------------------
 
-# 要订阅的股票列表
+# 要订阅的股票列表, Subscribe your symbols
 SYMBOLS = ["AAPL", "GOOGL", "TSLA"]
 
-# 固定为1分钟间隔
+# 固定为1分钟间隔, Aggregated Interval
 INTERVAL_KEY = "1min"
 INTERVAL_MIN = 1
 
-# API设置
-FINNHUB_TOKEN = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
+# API设置, Set your API
+FINNHUB_TOKEN = ""
 WS_URL = f"wss://ws.finnhub.io?token={FINNHUB_TOKEN}"
 
-# 输出路径
+# 输出路径, OutPut Path
 DATA_DIR = "./data/raw"
 LOG_DIR = "./data/logs"
 
@@ -144,15 +145,25 @@ def backfill_first_interval():
         
         try:
             # 使用Util中的函数获取历史数据
-            df = fetch_stock_data_finnhub_paginated(
+            # df = fetch_stock_data_finnhub_paginated(
+            #     symbol=symbol,
+            #     start_date=start_date,
+            #     end_date=end_date,
+            #     interval='1',  # 1分钟
+            #     token=FINNHUB_TOKEN,
+            #     chunk_days=1,  # 短时间范围，使用1天即可
+            #     verbose=False
+            # )
+            df = fetch_candle_data(
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
                 interval='1',  # 1分钟
                 token=FINNHUB_TOKEN,
-                chunk_days=1,  # 短时间范围，使用1天即可
-                verbose=False
+                chunk_days=2,  # 短时间范围，使用2天即可
+                max_workers=1, # 1 is enough
             )
+
             
             # 安全加载，处理可能的NaN值
             df = safeLoadCSV(df)

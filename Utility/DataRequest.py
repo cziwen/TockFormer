@@ -237,3 +237,35 @@ def fetch_tick_data (
         .dt.tz_convert ('America/New_York')
     )
     return df.sort_values ('timestamp').reset_index (drop=True)
+
+
+def fetch_tick_data_last_day(
+    symbol: str,
+    api_key: str,
+    limit: int = 25000,
+    page_workers: int = 5,
+    day_workers: int = 3,
+    sleep_sec: float = 0.1
+) -> pd.DataFrame:
+    """
+    分日并发拉取 Tick 数据（前天到今天），自动跳过周末：
+      - start = 今天日期 - 1 天
+      - end   = 今天日期
+    其它参数同原 fetch_tick_data。
+    """
+    # 计算日期范围
+    today = datetime.now()
+    start = today - timedelta(days=1)
+    end = today
+
+    # 复用原函数
+    return fetch_tick_data(
+        symbol=symbol,
+        start_date=start,
+        end_date=end,
+        api_key=api_key,
+        limit=limit,
+        page_workers=page_workers,
+        day_workers=day_workers,
+        sleep_sec=sleep_sec
+    )

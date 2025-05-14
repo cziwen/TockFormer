@@ -319,9 +319,7 @@ def on_message(ws, message):
     msg = json.loads(message)
     if msg.get("type") == "trade":
         for trade in msg["data"]:
-            if "1" not in trade.get("c", []):
-                continue # 没有包含1说明不是正常时段交易
-            
+
             symbol = trade["s"]
             price = trade["p"]
             volume = trade["v"]

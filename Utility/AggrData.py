@@ -28,7 +28,7 @@ from Preprocessing import aggregate_tick_to_minute  # 针对单只标的的函�
 # ---------------------------------------- 配置参数 ----------------------------------------
 SYMBOLS       = ["AAPL", "GOOGL", "TSLA"]
 INTERVAL_KEY  = "1min"
-FINNHUB_TOKEN = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
+FINNHUB_TOKEN = "YOUR API KEY"
 WS_URL        = f"wss://ws.finnhub.io?token={FINNHUB_TOKEN}"
 DATA_DIR      = "./realtimeData/raw"
 LOG_DIR       = "./realtimeData/logs"

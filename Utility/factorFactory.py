@@ -1,18 +1,19 @@
 import pandas as pd
+import numpy as np
 import ta
+import math
 from typing import Callable, Dict, List, Any
-import multiprocessing as mp
-from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
-
-# Registry to hold factor methods and their metadata
+# === 1. 因子注册 Decorator & Registry ===
 FACTOR_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 def factor(*tags: str):
     """
-    Decorator to register a method as a factor generator.
-    Supports multiple tags, e.g., @factor('bounded', 'technical').
+    注册因子方法；tags 示例：
+      @factor('bounded','individual')
+      @factor('unbounded','advanced')
     """
     def decorator(fn: Callable):
         FACTOR_REGISTRY[fn.__name__] = {
@@ -22,265 +23,225 @@ def factor(*tags: str):
         return fn
     return decorator
 
-def compute_temporal_cross_feature(task, df):
-    prefix, f1, f2 = task
-    s1, s2 = df[f1], df[f2]
-    if s1.nunique() <= 1 or s2.nunique() <= 1:
-        return {}
-    return {
-        f'{prefix}_cross_{f1}_mul_{f2}': s1 * s2,
-        f'{prefix}_cross_{f1}_minus_{f2}': s1 - s2,
-        f'{prefix}_cross_{f1}_div_{f2}': s1 / s2.replace(0, pd.NA)
-    }
+# === 2. 定义可用的交叉/一元操作及其“安全元数据” ===
+CROSS_OPS: List[Dict[str, Any]] = [
+    {
+        'name': 'mul',
+        'arity': 2,
+        'func': lambda x, y: x * y,
+        'preserves_bounded': True
+    },
+    {
+        'name': 'minus',
+        'arity': 2,
+        'func': lambda x, y: x - y,
+        'preserves_bounded': True
+    },
+    {
+        'name': 'div',
+        'arity': 2,
+        'func': lambda x, y: x.div(y.replace(0, pd.NA)),
+        'preserves_bounded': False
+    },
+    {
+        'name': 'sin',
+        'arity': 1,
+        'func': lambda x: x.map(math.sin),
+        'preserves_bounded': True
+    },
+    {
+        'name': 'cos',
+        'arity': 1,
+        'func': lambda x: x.map(math.cos),
+        'preserves_bounded': True
+    },
+]
 
+# === 3. FactorFactory 类 ===
 class FactorFactory:
-    def __init__(self, df: pd.DataFrame):
-        # parameter configurations
-        self.rsi_windows = [6, 10, 14, 20, 30] # 10
-        self.sma_windows = [5, 10, 20, 30, 50, 100, 200] # 21
-        self.ema_spans   = [5, 10, 12, 20, 30, 50, 100, 200] # 28
-        self.macd_pairs  = [(12,26), (5,20), (8,17), (10,30)] # 6
-        self.bb_windows  = [10, 20, 30] # 3
-        self.bb_dev      = [1.5, 2.0, 2.5] # 3
-        self.price_cols  = ['open','high','low','close']
-        self.df_global = df.copy().sort_values('timestamp').set_index('timestamp')
-
-    def generate_factors(self, include_only_bounded_factors: bool = True) -> pd.DataFrame:
+    def __init__(self, df: pd.DataFrame, target_cols: List[str]):
         """
-        Generate all registered factors:
-        1. Run all with 'individual' tag first (optionally restricted to 'bounded')
-        2. Then run all with 'advanced' tag
-        Update self.df_global with computed columns.
+        df: 原始包含 timestamp 列的数据
+        target_cols: 要生成因子的列名列表；若某列不存在则跳过
         """
+        self.df_global = (
+            df.copy()
+              .sort_values('timestamp')
+              .set_index('timestamp')
+        )
+        self.target_cols = target_cols
 
-        feats = {}
+        # —— 因子参数 ——
+        self.rsi_windows = [6, 10, 14]
+        self.sma_windows = [5, 10, 20]
+        self.ema_spans   = [5, 10, 20]
+        self.macd_pairs  = [(12,26), (5,20)]
+        self.bb_windows  = [10, 20]
+        self.bb_dev      = [1.5, 2.0]
 
-        # Phase 1: run 'individual' factors
-        for name, meta in FACTOR_REGISTRY.items():
-            tags = meta['tags']
-            if 'individual' not in tags:
-                continue
-            if include_only_bounded_factors and 'bounded' not in tags:
-                continue
-            fn = meta['func']
-            out = fn(self)
-            if isinstance(out, pd.Series):
-                feats[name] = out
-            else:
-                feats.update(out)
+    def generate_factors(
+        self,
+        layers: int = 2,
+        include_only_bounded_factors: bool = True
+    ) -> pd.DataFrame:
+        """
+        layers: 总层数（第 1 层基础因子；第 2+ 层做交叉）
+        include_only_bounded_factors: 第 1 层是否只跑标记为 bounded 的 individual 因子
+        """
+        # ——— 1. 第 1 层：跑 individual + advanced 因子 ———
+        base_feats: Dict[str, pd.Series] = {}
+        # 存 metadata：每列是否 bounded
+        meta: Dict[str, Dict[str, bool]] = {}
 
-        self.df_global = pd.concat([self.df_global, pd.DataFrame(feats, index=self.df_global.index)], axis=1)
+        # 收集 individual 方法
+        ind_methods = [
+            info for name, info in FACTOR_REGISTRY.items()
+            if 'individual' in info['tags']
+           and (not include_only_bounded_factors or 'bounded' in info['tags'])
+        ]
+        # 收集 advanced 方法
+        adv_methods = [
+            info for name, info in FACTOR_REGISTRY.items()
+            if 'advanced' in info['tags']
+        ]
 
-        # Phase 2: run 'advanced' factors
-        feats = {}
-        for name, meta in FACTOR_REGISTRY.items():
-            tags = meta['tags']
-            if 'advanced' not in tags:
-                continue
-            fn = meta['func']
-            out = fn(self)
-            if isinstance(out, pd.Series):
-                feats[name] = out
-            else:
-                feats.update(out)
+        # 执行 individual
+        for info in tqdm(ind_methods, desc="1️⃣ Individual factors"):
+            out = info['func'](self)
+            items = ([out] if isinstance(out, pd.Series)
+                     else [pd.Series(v, index=self.df_global.index, name=k)
+                           for k, v in out.items()])
+            for s in items:
+                col = s.name
+                base_feats[col] = s
+                meta[col] = {'is_bounded': ('bounded' in info['tags'])}
 
-        self.df_global = pd.concat([self.df_global, pd.DataFrame(feats, index=self.df_global.index)], axis=1)
+        # 执行 advanced
+        for info in tqdm(adv_methods, desc="2️⃣ Advanced factors"):
+            out = info['func'](self)
+            items = ([out] if isinstance(out, pd.Series)
+                     else [pd.Series(v, index=self.df_global.index, name=k)
+                           for k, v in out.items()])
+            for s in items:
+                col = s.name
+                base_feats[col] = s
+                meta[col] = {'is_bounded': ('bounded' in info['tags'])}
 
-        return self.df_global.reset_index()
+        # 构造第 1 层 DataFrame
+        feat_df = pd.DataFrame(base_feats)
 
-    # ====== individual factor methods ======
+        # ——— 2. 多层交叉 ———
+        prev_feats = base_feats.copy()
+        for layer in range(2, layers + 1):
+            new_feats: Dict[str, pd.Series] = {}
+            future_to_col: Dict[Any, str] = {}
+
+            with ThreadPoolExecutor() as exe:
+                # 二元交叉：上一层 × 第 1 层
+                for name1, s1 in prev_feats.items():
+                    for name2, s2 in base_feats.items():
+                        for op in CROSS_OPS:
+                            if op['arity'] != 2 or not op['preserves_bounded']:
+                                continue
+                            # 仅 bounded × bounded
+                            if not (meta[name1]['is_bounded'] and meta[name2]['is_bounded']):
+                                continue
+                            col = f"{name1}_{op['name']}_{name2}"
+                            fut = exe.submit(op['func'], s1, s2)
+                            future_to_col[fut] = col
+
+                # 一元交叉：sin/cos
+                for name1, s1 in prev_feats.items():
+                    for op in CROSS_OPS:
+                        if op['arity'] != 1 or not op['preserves_bounded']:
+                            continue
+                        col = f"{op['name']}_{name1}"
+                        fut = exe.submit(op['func'], s1)
+                        future_to_col[fut] = col
+
+                # 收集结果并用 tqdm 展示进度
+                for fut in tqdm(as_completed(future_to_col),
+                                total=len(future_to_col),
+                                desc=f"🔄 Layer {layer} cross"):
+                    col = future_to_col[fut]
+                    s = fut.result()
+                    if s.isna().all():
+                        continue
+                    s.name = col
+                    new_feats[col] = s
+                    # 新特征一律标为 bounded
+                    meta[col] = {'is_bounded': True}
+
+            # 下一层以 new_feats 为基础
+            prev_feats = new_feats
+            if new_feats:
+                feat_df = pd.concat([feat_df, pd.DataFrame(new_feats)], axis=1)
+
+        # 最终拼回 timestamp 列
+        feat_df.insert(0, 'timestamp', feat_df.index)
+        return feat_df.reset_index(drop=True)
+
+    # ========== 示例因子方法 ==========
+
     @factor('bounded', 'individual')
     def rsi_factors(self) -> Dict[str, pd.Series]:
-        print("Computing RSI factors...")
-        feats = {}
+        out: Dict[str, pd.Series] = {}
         for w in self.rsi_windows:
-            for c in self.price_cols:
-                key = f'rsi_{w}_{c}'
-                feats[key] = ta.momentum.RSIIndicator(self.df_global[c], window=w).rsi()
-        return feats
+            for c in self.target_cols:
+                if c not in self.df_global.columns:
+                    continue
+                key = f"rsi_{w}_{c}"
+                out[key] = ta.momentum.RSIIndicator(
+                    self.df_global[c], window=w
+                ).rsi()
+        return out
 
     @factor('unbounded', 'individual')
     def sma_factors(self) -> Dict[str, pd.Series]:
-        print("Computing SMA factors...")
-        feats = {}
+        out: Dict[str, pd.Series] = {}
         for w in self.sma_windows:
-            for c in self.price_cols:
-                key = f'sma_{w}_{c}'
-                feats[key] = self.df_global[c].rolling(w).mean()
-        return feats
+            for c in self.target_cols:
+                if c not in self.df_global.columns:
+                    continue
+                out[f"sma_{w}_{c}"] = self.df_global[c].rolling(w).mean()
+        return out
 
     @factor('unbounded', 'individual')
     def ema_factors(self) -> Dict[str, pd.Series]:
-        print("Computing EMA factors...")
-        feats = {}
-        for s in self.ema_spans:
-            for c in self.price_cols:
-                key = f'ema_{s}_{c}'
-                feats[key] = self.df_global[c].ewm(span=s).mean()
-        return feats
+        out: Dict[str, pd.Series] = {}
+        for span in self.ema_spans:
+            for c in self.target_cols:
+                if c not in self.df_global.columns:
+                    continue
+                out[f"ema_{span}_{c}"] = self.df_global[c].ewm(span=span).mean()
+        return out
 
     @factor('unbounded', 'individual')
     def macd_factors(self) -> Dict[str, pd.Series]:
-        print("Computing MACD factors...")
-        feats = {}
+        out: Dict[str, pd.Series] = {}
         for fast, slow in self.macd_pairs:
-            for c in self.price_cols:
-                key = f'macd_diff_{fast}_{slow}_{c}'
-                macd = ta.trend.MACD(self.df_global[c], window_fast=fast, window_slow=slow)
-                feats[key] = macd.macd_diff()
-        return feats
-
-    @factor('bounded', 'individual')
-    def bb_pband_factors(self) -> Dict[str, pd.Series]:
-        print("Computing BB factors...")
-        feats = {}
-        for w in self.bb_windows:
-            for dev in self.bb_dev:
-                key = f'bb_pband_{w}_{dev}'
-                bb = ta.volatility.BollingerBands(self.df_global['close'], window=w, window_dev=dev)
-                feats[key] = bb.bollinger_pband()
-        return feats
-
-    @factor('unbounded', 'individual')
-    def bb_price_factors(self) -> Dict[str, pd.Series]:
-        print("Computing BB price factors...")
-        feats = {}
-        for w in self.bb_windows:
-            for dev in self.bb_dev:
-                mavg = ta.volatility.BollingerBands(self.df_global['close'], window=w, window_dev=dev).bollinger_mavg()
-                feats[f'bb_mavg_{w}_{dev}'] = mavg
-                feats[f'bb_hband_{w}_{dev}'] = ta.volatility.BollingerBands(self.df_global['close'], window=w, window_dev=dev).bollinger_hband()
-                feats[f'bb_lband_{w}_{dev}'] = ta.volatility.BollingerBands(self.df_global['close'], window=w, window_dev=dev).bollinger_lband()
-        return feats
-
-
-    # ====== advanced factor methods =====
+            for c in self.target_cols:
+                if c not in self.df_global.columns:
+                    continue
+                macd = ta.trend.MACD(
+                    self.df_global[c],
+                    window_fast=fast,
+                    window_slow=slow
+                )
+                out[f"macd_diff_{fast}_{slow}_{c}"] = macd.macd_diff()
+        return out
 
     @factor('bounded', 'advanced')
-    def temporal_cross_feature(self) -> Dict[str, pd.Series]:
-        """
-        For each factor type (rsi, sma, ema, macd), compute cross features (mul, minus, div)
-        between all different windows with the same price field.
-        """
+    def bb_pband_factors(self) -> Dict[str, pd.Series]:
+        out: Dict[str, pd.Series] = {}
+        # 只针对 'close' 列
+        if 'close' in self.df_global.columns and 'close' in self.target_cols:
+            for w in self.bb_windows:
+                for dev in self.bb_dev:
+                    bb = ta.volatility.BollingerBands(
+                        self.df_global['close'], window=w, window_dev=dev
+                    )
+                    out[f"bb_pband_{w}_{dev}"] = bb.bollinger_pband()
+        return out
 
-        print("[CrossFeature] Building cross features by factor, price, and window...")
-
-        feats = {}
-        tasks = []
-
-        def collect_factor_variants(factor_name: str, window_list: List, price_list: List[str]):
-            for price in price_list:
-                cols = []
-                print(f"\n>>> Collecting for {factor_name} + {price}")
-                for w in window_list:
-                    col_name = f'{factor_name}_{w}_{price}'
-                    print(f"Looking for: {col_name} → {'✓' if col_name in self.df_global.columns else '✗'}")
-                    if col_name in self.df_global.columns:
-                        cols.append(col_name)
-                # Build pairwise tasks
-                for i in range(len(cols)):
-                    for j in range(i + 1, len(cols)):
-                        tasks.append((factor_name, cols[i], cols[j]))
-
-        # rsi, sma, ema follow (factor_name, window, price)
-        collect_factor_variants('rsi', self.rsi_windows, self.price_cols)
-        collect_factor_variants('sma', self.sma_windows, self.price_cols)
-        collect_factor_variants('bb_pband', self.ema_spans, self.bb_dev)
-
-        if not tasks:
-            print("[CrossFeature] Warning: No valid factor combinations found.")
-            return {}
-
-        print(f"[CrossFeature] Launching {len(tasks)} tasks using {mp.cpu_count()} cores...")
-
-        chunk_size = max(1, len(tasks) // (mp.cpu_count() * 4))
-
-        with mp.Pool(processes=mp.cpu_count()) as pool:
-            for res in tqdm(pool.imap_unordered(partial(compute_temporal_cross_feature, df=self.df_global), tasks,
-                                                chunksize=chunk_size), total=len(tasks),
-                            desc="[CrossFeature] Progress"):
-                feats.update(res)
-
-        print("[CrossFeature] Done.")
-        return feats
-
-
-    # @factor('unbounded')
-    # def momentum_atr_ratio(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-    #     """
-    #     Momentum / ATR across all momentum periods and ATR windows.
-    #     """
-    #     feats = {}
-    #     for mom_period in self.sma_windows:  # reuse sma_windows for momentum periods
-    #         mom = ta.momentum.ROCIndicator(df['close'], window=mom_period).roc()
-    #         for atr_w in self.bb_windows:  # reuse bb_windows for atr window
-    #             atr = ta.volatility.AverageTrueRange(
-    #                 df['high'], df['low'], df['close'], window=atr_w
-    #             ).average_true_range()
-    #             feats[f'mom{mom_period}_div_atr{atr_w}'] = mom / atr.replace(0, pd.NA)
-    #     return feats
-    #
-    # @factor('bounded')
-    # def obv_volume_ratio(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-    #     """
-    #     OBV(OnBalanceVolume) / Volume across different EMA spans for volume smoothing.
-    #     """
-    #     feats = {}
-    #     obv = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
-    #     for span in self.ema_spans:
-    #         vol_ema = df['volume'].ewm(span=span, adjust=False).mean()
-    #         feats[f'obv_div_vol_ema{span}'] = obv / vol_ema.replace(0, pd.NA)
-    #     return feats
-    #
-    # @factor('unbounded')
-    # def rsi_macd_cross(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-    #     """
-    #     RSI × MACD(diff) for all combinations of RSI windows and MACD pairs.
-    #     """
-    #     feats = {}
-    #     for rsi_w in self.rsi_windows:
-    #         rsi = ta.momentum.RSIIndicator(df['close'], window=rsi_w).rsi()
-    #         for fast, slow in self.macd_pairs:
-    #             macd = ta.trend.MACD(df['close'], window_fast=fast, window_slow=slow).macd_diff()
-    #             feats[f'cross_feature_rsi{rsi_w}_mul_macd_diff_{fast}_{slow}'] = rsi * macd
-    #     return feats
-    #
-    # @factor(tag='unbounded')
-    # def long_term_deviation(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-    #     """
-    #     Compute standardized deviation of close price from EMA for multiple long-term spans.
-    #     Formula: (close / EMA - 1) * 100
-    #     """
-    #     feats = {}
-    #     for span in self.sma_windows:  # 使用 sma_windows 作为 EMA 的周期范围
-    #         ema = df['close'].ewm(span=span, adjust=False).mean()
-    #         dev = ((df['close'] / ema.replace(0, pd.NA)) - 1.0) * 100
-    #         feats[f'close_ema{span}_dev_pct'] = dev
-    #     return feats
-
-
-    # ... similarly add ATR, ADX, CCI, ROC, MOM, WR, volume factors
-    # each method decorated with @factor(tag='bounded' or 'unbounded')
-
-    def list_factors(self, tag: str = None) -> List[str]:
-        """
-        List registered factor method names, optionally filtered by tag.
-        """
-        if tag:
-            return [name for name, meta in FACTOR_REGISTRY.items() if meta['tag'] == tag]
-        return list(FACTOR_REGISTRY.keys())
-
-    def call_factor(self, name: str, df: pd.DataFrame) -> pd.Series:
-        """
-        Call a single factor by name and return its series.
-        """
-        meta = FACTOR_REGISTRY[name]
-        return meta['func'](self, df.set_index('timestamp')).rename(name)
-
-
-
-# Usage:
-# ff = FactorFactory()
-# all_df = ff.generate_factors(df) # 求所有的因子
-# bounded_list = ff.list_factors(tag='bounded') # 查看所有 有范围的 因子
-# single_series = ff.call_factor('rsi_factors', df) # 计算单一因子方程
+    # …你可以继续用 @factor 模板添加更多因子方法…

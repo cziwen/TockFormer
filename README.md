@@ -4,27 +4,95 @@
 
 ---
 
-## 🧠 Overview
+## 📌 Log Board (as of 2025-05-16)
 
-**TockFormer** is an integrated pipeline for quantitative financial analysis. Its ultimate goal is to:
+<details>
+<summary>🔌 Real-time Tick Ingestion (Updated: 2025-05-16)</summary>
 
-- ✅ Ingest real-time tick data  
-- ✅ Aggregate and transform raw data into structured CSV files  
-- 🛠️ Enable on-demand feature engineering  
-- 🤖 Feed processed data into machine learning models  
-- 💡 Generate trade signals based on model output
+- Enhanced `on_message` throughput using **mpi4py** to parallelize and streamline tick data ingestion.
+- Optimization: Improved high-frequency tick data handling by distributing message processing across MPI workers, mitigating processing lags during trading spikes.
+- Built a standalone `launcher.py` script for scheduling pipeline execution over custom time intervals.
+- Optimization: Recommended launch time is **3:00 AM Eastern Time** to ensure complete tick data availability from the previous trading day, due to Finnhub's historical data update policy.
+
+</details>
+
+<details>
+<summary>🧠 Feature Engineering — FactorFactory Module (Updated: 2025-05-15)</summary>
+
+- Implemented a **tree-based structure** for automatic feature (factor) expansion, allowing scalable generation of cross-features from primitive indicators.
+- Integrated **A\*** search algorithm to intelligently explore the feature space based on heuristics (e.g., IC distance to target).
+- Optimization: Each path in the factor tree is guided by a combined scoring metric using **|Spearman IC| + |Pearson IR|**, and heuristics help avoid exhaustive brute-force search.
+- Added optional pruning logic using correlation matrix and PCA to remove redundant features.
+
+</details>
+
+<details>
+<summary>🤖 Model Inference (Not yet updated)</summary>
+
+- Placeholder for future logs related to model training, validation, and prediction integration.
+- No updates yet. This module is currently under development.
+
+</details>
+
+<details>
+<summary>💡 Signal Generation (Not yet updated)</summary>
+
+- Placeholder for future logs related to trading signal generation, output formatting, and strategy logic.
+- No updates yet. This module is currently under development.
+
+</details>
 
 ---
 
+## 🧠 Overview
+
+**TockFormer** is an end-to-end pipeline for real-time quantitative financial signal generation. The system follows this modular workflow:
+
+1. 🔌 **Real-time Tick Ingestion**  
+   - Subscribe to live trade data via WebSocket  
+   - Aggregate and write to a CSV(or any db you prefer)
+
+2. 🧠 **Feature Engineering (FactorFactory)**  
+   - Automatic factor generation and search
+
+3. 🤖 **Model Inference**  
+   - Feed curated features into machine learning models for prediction
+
+4. 💡 **Signal Generation**  
+   - Output trading signals based on model results (to be finalized)
+
+---
 ## ✅ Current Status
 
-The following functionality is currently implemented:
+Project progress is tracked by the four core modules, and part of them are good to use:
+###### guides for usage will be provided in the future
+<details>
+<summary>🔌 Real-time Tick Ingestion — ✅</summary>
 
-- 📡 Real-time data streaming  
-- 🧾 CSV aggregation for downstream analysis  
+- WebSocket subscription and message ingestion implemented  
+- Aggregation and parallel I/O via `mpi4py` operational
 
-Users can analyze or process the resulting CSVs as needed.
+</details>
 
+<details>
+<summary>🧠 Feature Engineering — FactorFactory — ✅</summary>
+
+- Tree-based generation and heuristic search functioning as intended
+
+</details>
+
+<details>
+<summary>🤖 Model Inference — ❌</summary>
+
+- Model loading and prediction pipeline not yet implemented
+
+</details>
+
+<details>
+<summary>💡 Signal Generation — ❌</summary>
+- Signal decoding and trade logic pending
+
+</details>
 ---
 
 ## ⚡ Quick Start

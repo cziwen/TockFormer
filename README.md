@@ -101,12 +101,13 @@ Project progress is tracked by the four core modules, and part of them are good 
 > - `numpy`  
 > - `pandas`  
 > - `torch` *(install either the CPU or GPU version depending on your system)*
+> - and many other packages...
 
 ### 🔧 Steps to Run:
-
 1. Open `Utility/AggrData.py` and configure your **Finnhub API token**.  
    - A free token is available at [https://finnhub.io](https://finnhub.io)
-2. Set your preferred **log file** and **CSV output paths** inside the script or via environment variables.  
+2. Set your preferred **log file** and **CSV output paths** inside the script or via environment variables. 
+   - run `benchmark_websocket.ipynb` to see what is your device's IO speed. normally a popular symbol has 3000 ticks/sec, so this file tells you how many symbol you can subscribe at one time.
 3. Start the pipeline with:
 
 ```bash

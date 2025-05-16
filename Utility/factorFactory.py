@@ -2,9 +2,14 @@ import pandas as pd
 import numpy as np
 import math
 from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+from matplotlib.colors import ListedColormap
 from tqdm import tqdm
 from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
+from sklearn.manifold import LocallyLinearEmbedding, TSNE
+import matplotlib.pyplot as plt
 
 # 导入注册器和因子定义
 from Utility.registry import FACTOR_REGISTRY
@@ -20,6 +25,13 @@ CROSS_OPS: List[Dict[str, Any]] = [
 ]
 
 
+def _spearman_row_proc (i: int, X: np.ndarray) -> (int, np.ndarray):
+    xi = X[i]
+    # 计算第 i 行和其它所有行的 Spearman
+    row = np.array ([abs (spearmanr (xi, X[j]).correlation) for j in range (X.shape[0])])
+    return i, row
+
+
 class FactorFactory:
     def __init__ (
             self,
@@ -31,7 +43,6 @@ class FactorFactory:
         df: 原始包含 timestamp 列的数据
         target_cols: 要生成因子的列名列表；若 None，则取所有数值型列
         """
-        # 全局数据准备
         self.df_global = df.copy ().sort_values ('timestamp').set_index ('timestamp')
         if target_cols is None:
             self.target_cols = [
@@ -57,17 +68,8 @@ class FactorFactory:
             skip_base: bool = False,
             cross_all: bool = False
     ) -> pd.DataFrame:
-        """
-        生成因子并存储到 self.df_features:
-          - layers: 总层数（第1层基础；第2+层交叉）
-          - include_only_bounded_factors: 第1层是否只跑 bounded individual
-          - skip_base: 是否跳过第1层基础因子
-          - cross_all: 是否对所有累计特征做交叉
-        返回：无缺失值的 timestamp + 因子特征表
-        """
         base_feats: Dict[str, pd.Series] = {}
         meta: Dict[str, Dict[str, bool]] = {}
-        # 第1层基础特征
         if skip_base:
             for col in self.target_cols:
                 if col in self.df_global.columns:
@@ -95,16 +97,13 @@ class FactorFactory:
                 for s in items:
                     base_feats[s.name] = s
                     meta[s.name] = {'is_bounded': ('bounded' in info['tags'])}
-        # 合成 DataFrame
         feat_df = pd.DataFrame (base_feats)
         prev_feats = base_feats.copy ()
-        # 多层交叉
         for layer in range (2, layers + 1):
             new_feats: Dict[str, pd.Series] = {}
             future_to_col: Dict[Any, str] = {}
             right_feats = feat_df if cross_all else base_feats
             with ThreadPoolExecutor () as exe:
-                # 二元操作
                 for n1, s1 in prev_feats.items ():
                     for n2, s2 in right_feats.items ():
                         for op in CROSS_OPS:
@@ -114,14 +113,12 @@ class FactorFactory:
                                 continue
                             col = f"{n1}_{op['name']}_{n2}"
                             future_to_col[exe.submit (op['func'], s1, s2)] = col
-                # 一元操作
                 for n1, s1 in prev_feats.items ():
                     for op in CROSS_OPS:
                         if op['arity'] != 1 or not op['preserves_bounded']:
                             continue
                         col = f"{op['name']}_{n1}"
                         future_to_col[exe.submit (op['func'], s1)] = col
-                # 收集结果
                 for fut in tqdm (as_completed (future_to_col), total=len (future_to_col),
                                  desc=f"🔄 Layer {layer} cross"):
                     col = future_to_col[fut]
@@ -134,22 +131,12 @@ class FactorFactory:
             prev_feats = new_feats
             if new_feats:
                 feat_df = pd.concat ([feat_df, pd.DataFrame (new_feats)], axis=1)
-
-
-        # 去除含有 NaN 的行
         feat_df.insert (0, 'timestamp', feat_df.index)
         feat_df = feat_df.dropna ()
-
-        # 删除常数因子并报告
-        constant_cols = [
-            c for c in feat_df.columns
-            if c != 'timestamp' and feat_df[c].nunique () <= 1
-        ]
+        constant_cols = [c for c in feat_df.columns if c != 'timestamp' and feat_df[c].nunique () <= 1]
         if constant_cols:
-            # print (f"Removed constant factors: {constant_cols}")
             feat_df = feat_df.drop (columns=constant_cols)
         self.df_features = feat_df.reset_index (drop=True)
-
         return self.df_features
 
     def evaluate_factors (
@@ -159,52 +146,111 @@ class FactorFactory:
             top_k: int,
             n_jobs: Optional[int] = None
     ) -> pd.DataFrame:
-        """
-        并行评估因子有效性，保存前 top_k IC:
-        forward_period: 前瞻收益期
-        window: 滑动窗口大小
-        top_k: 保留最优因子数量
-        n_jobs: 最大线程数，None 则使用默认
-        返回：筛选后的 ic_summary
-        """
-
-
         df_feat = self.df_features.set_index ('timestamp')
         df_input = self.df_input.set_index ('timestamp')
         price = df_input['close'] if 'close' in df_input else df_input.iloc[:, 1]
         forward_return = price.shift (-forward_period) / price - 1
         df = df_feat.join (forward_return.rename ('forward_return')).dropna ()
 
-        # 单列 IC 计算函数
         def calc_ic (col: str) -> Dict[str, float]:
-            series = df[col]
-            target = df['forward_return']
-            spearman_val = spearmanr (series, target).correlation
-            rolling = series.rolling (window).corr (target)
-            pearson_mean = rolling.mean ()
-            pearson_std = rolling.std ()
-            pearson_ir = pearson_mean / pearson_std if pearson_std != 0 else np.nan
-            return {
-                'spearman_ic': spearman_val,
-                'pearson_ic_mean': pearson_mean,
-                'pearson_ic_std': pearson_std,
-                'pearson_ic_ir': pearson_ir
-            }
+            s = df[col];
+            t = df['forward_return']
+            sp = spearmanr (s, t).correlation
+            roll = s.rolling (window).corr (t)
+            pm = roll.mean ();
+            ps = roll.std ();
+            pir = pm / ps if ps != 0 else np.nan
+            return {'spearman_ic': sp, 'pearson_ic_mean': pm, 'pearson_ic_std': ps, 'pearson_ic_ir': pir}
 
-        # 并行计算
         ic_dict: Dict[str, Dict[str, float]] = {}
         cols = list (df_feat.columns)
         with ThreadPoolExecutor (max_workers=n_jobs) as exe:
             futures = {exe.submit (calc_ic, c): c for c in cols}
             for fut in tqdm (as_completed (futures), total=len (futures), desc="🔍 Evaluating IC"):
-                col = futures[fut]
-                ic_dict[col] = fut.result ()
-        # 构建 summary 并筛选 top_k
+                ic_dict[futures[fut]] = fut.result ()
         summary = pd.DataFrame.from_dict (ic_dict, orient='index')
         summary['combined_score'] = summary['pearson_ic_ir'].abs () + summary['spearman_ic'].abs ()
         summary = summary.sort_values ('combined_score', ascending=False).head (top_k)
         self.ic_summary = summary
         return self.ic_summary
+
+    def filter (
+            self,
+            k: int,
+            corr_combine: str = 'average',
+            n_jobs: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        基于 IC+冗余的贪心算法选出最优的 k 个因子：
+          1) 先按 |spearman_ic|+|pearson_ic_ir| 降序生成候选列表
+          2) 用合并后的 Pearson/Spearman 相关矩阵，在候选中贪心挑选，
+             首先取 IC 最高的那个，后续每次取与已选集合相关度最小的因子
+          3) 最后对保留因子做 PCA(99%) 分析
+        返回 {'kept': [...], 'dropped': [...], 'pca_n99': int}
+        """
+        # —— 计算相关度矩阵 ——
+        df = self.df_features.drop (columns='timestamp')
+        X = df.values.T  # shape (n_features, n_samples)
+        n = X.shape[0]
+
+        # Pearson
+        corr_p = np.abs (np.corrcoef (X))
+
+        # Spearman 并行
+        corr_s = np.zeros ((n, n), dtype=float)
+        with ProcessPoolExecutor (max_workers=n_jobs) as exe:
+            futures = {exe.submit (_spearman_row_proc, i, X): i for i in range (n)}
+            for fut in tqdm (as_completed (futures), total=n, desc="🔍 Spearman rows"):
+                i, row = fut.result ()
+                corr_s[i, :] = row
+        corr_s = (corr_s + corr_s.T) / 2
+        np.fill_diagonal (corr_s, 0)
+
+        # 合并相关度
+        if corr_combine == 'max':
+            corr = np.maximum (corr_p, corr_s)
+        else:
+            corr = (corr_p + corr_s) / 2.0
+
+        # —— 生成 IC 排序列表 ——
+        # 假设 self.ic_summary 已包含 'spearman_ic' 和 'pearson_ic_ir'
+        ic_df = self.ic_summary.copy ()
+        ic_df['combined_ic'] = ic_df['spearman_ic'].abs () + ic_df['pearson_ic_ir'].abs ()
+        # 保证顺序与 corr 矩阵行列对应
+        features = list (df.columns)
+        ic_df = ic_df.reindex (features)
+        candidates = ic_df.sort_values ('combined_ic', ascending=False).index.tolist ()
+
+        # —— 贪心选 k 因子 ——
+        kept = []
+        # 1) 先取 IC 最高的一个
+        kept.append (candidates.pop (0))
+
+        # 2) 依次挑与已选集合相关度最小的
+        feature_to_idx = {f: i for i, f in enumerate (features)}
+        while len (kept) < k and candidates:
+            # 计算每个候选与 kept 集合的最大相关度
+            max_corrs = []
+            for f in candidates:
+                idx = feature_to_idx[f]
+                kept_idxs = [feature_to_idx[kf] for kf in kept]
+                max_corrs.append (corr[idx, kept_idxs].max ())
+            # 选出最大相关度最小的候选
+            best_pos = int (np.argmin (max_corrs))
+            best_feat = candidates.pop (best_pos)
+            kept.append (best_feat)
+
+        dropped = [f for f in features if f not in kept]
+
+        # —— PCA 99% 方差分析 ——
+        X_std = (df - df.mean ()) / df.std ()
+        evr = np.cumsum (PCA ().fit (X_std).explained_variance_ratio_)
+        pca_n99 = int (np.searchsorted (evr, 0.99) + 1)
+
+        # 更新 df_features
+        self.df_features = self.df_features[['timestamp'] + kept]
+
+        return {'kept': kept, 'dropped': dropped, 'pca_n99': pca_n99}
 
     def get_ic_summary (
             self,
@@ -212,12 +258,6 @@ class FactorFactory:
             ascending: bool = False,
             by_abs: bool = False
     ) -> pd.DataFrame:
-        """
-        返回已保存的 ic_summary，按指定列排序。
-        sort_by: 排序列名 ('spearman_ic', 'pearson_ic_ir', 'combined_score')
-        ascending: 是否升序
-        by_abs: 是否按绝对值排序
-        """
         df = self.ic_summary.copy ()
         if by_abs:
             df['_key'] = df[sort_by].abs ()
@@ -226,4 +266,60 @@ class FactorFactory:
             df = df.sort_values (sort_by, ascending=ascending)
         return df
 
-# —— 继续在 factors.py 添加更多因子 ——
+    def visualize_structure_2d (
+            self,
+            target_col: str,
+            lle_n_neighbors: int = 10,
+            tsne_perplexity: float = 30.0,
+            forward: int = 1,
+            random_state: int = 42
+    ) -> None:
+        """
+        在四个子图中绘制：
+          - PCA（2 维）
+          - LLE（2 维）
+          - t-SNE（2 维）
+          - PCA(99%) + t-SNE
+        点的颜色区分 target_col 的下一期正/负收益。
+        """
+        # 计算 return percentage
+        price = self.df_input.set_index ('timestamp')[target_col]
+        ret = price.pct_change ().shift (-forward)
+        # 合并特征与收益
+        merged = self.df_features.merge (
+            ret.rename (f"{target_col}_return_pct").reset_index (),
+            on='timestamp'
+        )
+        colors = (merged[f"{target_col}_return_pct"] > 0).astype (int)
+        cmap = ListedColormap (['red', 'green'])
+        # 标准化特征矩阵
+        feats = merged.drop (columns=['timestamp', f"{target_col}_return_pct"])
+        X = (feats - feats.mean ()) / feats.std ()
+        fig, axes = plt.subplots (2, 2, figsize=(12, 10))
+        # 1) PCA 2D
+        pca2 = PCA (n_components=2, random_state=random_state)
+        X_pca2 = pca2.fit_transform (X)
+        axes[0, 0].scatter (X_pca2[:, 0], X_pca2[:, 1], c=colors, cmap=cmap, s=5, alpha=0.7)
+        axes[0, 0].set_title ('PCA (2 Components)')
+        # 2) LLE 2D
+        lle = LocallyLinearEmbedding (n_neighbors=lle_n_neighbors, n_components=2, random_state=random_state)
+        X_lle = lle.fit_transform (X)
+        axes[0, 1].scatter (X_lle[:, 0], X_lle[:, 1], c=colors, cmap=cmap, s=5, alpha=0.7)
+        axes[0, 1].set_title (f'LLE (n_neighbors={lle_n_neighbors})')
+        # 3) t-SNE 2D
+        tsne = TSNE (n_components=2, perplexity=tsne_perplexity, random_state=random_state)
+        X_tsne = tsne.fit_transform (X)
+        axes[1, 0].scatter (X_tsne[:, 0], X_tsne[:, 1], c=colors, cmap=cmap, s=5, alpha=0.7)
+        axes[1, 0].set_title (f't-SNE (perplexity={tsne_perplexity})')
+        # 4) PCA(99%) -> t-SNE
+        evr = np.cumsum (PCA ().fit (X).explained_variance_ratio_)
+        n99 = int (np.searchsorted (evr, 0.99) + 1)
+        pca99 = PCA (n_components=n99, random_state=random_state)
+        X_pca99 = pca99.fit_transform (X)
+        tsne2 = TSNE (n_components=2, perplexity=tsne_perplexity, random_state=random_state)
+        X_pca99_tsne = tsne2.fit_transform (X_pca99)
+        axes[1, 1].scatter (X_pca99_tsne[:, 0], X_pca99_tsne[:, 1], c=colors, cmap=cmap, s=5, alpha=0.7)
+        axes[1, 1].set_title (f'PCA({n99}) + t-SNE')
+        plt.tight_layout ()
+        plt.show ()
+# —— 继续在 Utility/factors.py 添加更多因子 ——

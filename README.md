@@ -3,42 +3,41 @@
 #### 🚧 Note: This project is a work in progress and is not yet production-ready.
 
 ---
-
 ## 📌 Log Board (as of 2025-05-16)
 
 <details>
 <summary>🔌 Real-time Tick Ingestion (Updated: 2025-05-16)</summary>
 
-- Enhanced `on_message` throughput using **mpi4py** to parallelize and streamline tick data ingestion.
-- Optimization: Improved high-frequency tick data handling by distributing message processing across MPI workers, mitigating processing lags during trading spikes.
-- Built a standalone `launcher.py` script for scheduling pipeline execution over custom time intervals.
-- Optimization: Recommended launch time is **3:00 AM Eastern Time** to ensure complete tick data availability from the previous trading day, due to Finnhub's historical data update policy.
+- ✅ Implemented workable tick-level ingestion module. *(2025-05-05)*  
+- ✅ Built a standalone `launcher.py` script for scheduling pipeline execution over custom time intervals. *(2025-05-14)*  
+- ✅ Enhanced IO throughput using **mpi4py** to parallelize and streamline tick data ingestion. *(2025-05-16)*  
 
 </details>
 
 <details>
 <summary>🧠 Feature Engineering — FactorFactory Module (Updated: 2025-05-15)</summary>
 
-- Implemented a **tree-based structure** for automatic feature (factor) expansion, allowing scalable generation of cross-features from primitive indicators.
-- Integrated **A\*** search algorithm to intelligently explore the feature space based on heuristics (e.g., IC distance to target).
-- Optimization: Each path in the factor tree is guided by a combined scoring metric using **|Spearman IC| + |Pearson IR|**, and heuristics help avoid exhaustive brute-force search.
-- Added optional pruning logic using correlation matrix and PCA to remove redundant features.
+- ✅ Implemented a **tree-based structure** for automatic factor expansion. *(2025-05-12)*  
+- ✅ Added combined IC+IR score metric (**|Spearman IC| + |Pearson IR|**) to guide factor selection. *(2025-05-13)*  
+- ✅ Enabled bounded cross-operations (e.g., +, −, ×, ÷, sin, cos) with constraints on output stability. *(2025-05-14)*  
+- ✅ Optimized search by pruning correlated factors with a **greedy minimum-correlation selection**. *(2025-05-15)*  
+- 🔄 *(Proposed)* Introduce A* search algorithm for intelligent feature exploration based on IC distance. *(Planned)*  
 
 </details>
 
 <details>
 <summary>🤖 Model Inference (Not yet updated)</summary>
 
-- Placeholder for future logs related to model training, validation, and prediction integration.
-- No updates yet. This module is currently under development.
+- ⏳ Placeholder for future logs related to model training, validation, and prediction integration. *(To be started after 2025-05-25)*  
+- ❌ No updates yet. This module is currently under development.  
 
 </details>
 
 <details>
 <summary>💡 Signal Generation (Not yet updated)</summary>
 
-- Placeholder for future logs related to trading signal generation, output formatting, and strategy logic.
-- No updates yet. This module is currently under development.
+- ⏳ Placeholder for future logs related to trading signal generation, output formatting, and strategy logic. *(To be started after 2025-06-05)*  
+- ❌ No updates yet. This module is currently under development.  
 
 </details>
 

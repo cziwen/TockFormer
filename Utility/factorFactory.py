@@ -81,44 +81,34 @@ class FactorFactory:
     def apply_registry (
             self,
             df: pd.DataFrame,
+            cols: List[str],
             bounded_only: bool = False
     ) -> pd.DataFrame:
         """
         对传入的 df（必须有 timestamp 索引）按列依次执行 FACTOR_REGISTRY
-        中注册的所有 func，返回一个 new_feats DataFrame。
-        bounded_only=True 时，跳过非 'bounded' 因子。
+        中注册的所有 func。因子函数自行命名 out[key]，这里直接汇总。
         """
         # 备份原属性
-        orig_df = self.df_global
-        orig_base = self.base_cols
-        orig_target = self.target_col
+        orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
 
         # 临时替换
         self.df_global = df.copy ()
-        self.base_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype (df[c])]
+        self.base_cols = cols.copy ()
         self.target_col = self.target_col if self.target_col in df.columns else None
 
         new_feats: Dict[str, pd.Series] = {}
-        for info in FACTOR_REGISTRY.values ():
+        for prefix, info in FACTOR_REGISTRY.items ():
             tags = info.get ('tags', [])
             if bounded_only and 'bounded' not in tags:
                 continue
 
-            out = info['func'] (self)
-            # 处理返回
-            if isinstance (out, pd.Series):
-                col = out.name or info.get ('name', 'unnamed_factor')
-                out = out.rename (col)
-                new_feats[col] = out
-            else:
-                for name, series in out.items ():
-                    new_feats[name] = pd.Series (series, index=df.index, name=name)
+            out = info['func'] (self, df, cols)
+            for key, series in out.items ():
+                # trust the key from factors.py
+                new_feats[key] = pd.Series (series, index=df.index, name=key)
 
         # 恢复原属性
-        self.df_global = orig_df
-        self.base_cols = orig_base
-        self.target_col = orig_target
-
+        self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
         return pd.DataFrame (new_feats, index=df.index)
 
     def generate_factors (
@@ -127,19 +117,23 @@ class FactorFactory:
             n_job: Optional[int] = None,
             bounded_only: bool = False
     ) -> pd.DataFrame:
-        # 1) 先用注册表生成一阶因子
-        feat_df = self.apply_registry (self.df_global, bounded_only=bounded_only)
+        # 1) 一阶因子
+        feat_df = self.apply_registry (
+            df=self.df_global,
+            cols=self.base_cols,
+            bounded_only=bounded_only
+        )
         feat_df.index.name = 'timestamp'
 
-        # 2) 再做交叉运算
+        # 2) 交叉特征
         cross_df = self.cross_op (feat_df, mode, n_job, bounded_only)
 
-        # 3) 合并、去常数/NaN
+        # 3) 合并 & 清洗
         merged = pd.concat ([feat_df, cross_df], axis=1)
         drop_cols = merged.nunique ()[merged.nunique () <= 1].index.tolist ()
         df_feat = merged.drop (columns=drop_cols).dropna ()
 
-        # 4) reset_index 并评估
+        # 4) 存储 & 评估
         self.df_features = df_feat.reset_index ().round (self.decimals)
         self.evaluate_factors (**self._eval_kwargs)
         return self.df_features
@@ -154,8 +148,12 @@ class FactorFactory:
         data = input_df.copy ()
         feats: Dict[str, pd.Series] = {}
 
-        # —— 新增：先跑注册表 ——
-        reg_df = self.apply_registry (data, bounded_only=bounded_only)
+        # —— 一阶因子 on 子集 ——
+        reg_df = self.apply_registry (
+            df=data,
+            cols=list (data.columns),
+            bounded_only=bounded_only
+        )
         feats.update (reg_df.to_dict ('series'))
 
         # —— 一元算子 ——
@@ -203,7 +201,6 @@ class FactorFactory:
                 name, series = _cross_apply (t)
                 feats[name] = series
 
-        # 构造 DataFrame 并对齐
         df_new = pd.DataFrame (feats).reindex (data.index)
         df_new.index.name = 'timestamp'
         return df_new
@@ -215,90 +212,52 @@ class FactorFactory:
             scaler: str = 'minmax',
             top_k: Optional[int] = None
     ) -> pd.DataFrame:
-        # 对齐索引
         df = self.df_features.set_index ('timestamp')
         price = self.df_global[self.target_col]
         returns = price.shift (-forward_period) / price - 1
         df_eval = df.join (returns.rename ('forward_return')).dropna ()
 
-        # 如果数据行少于窗口，则自动缩小窗口
         win_eff = min (window, max (1, len (df_eval) - 1))
 
-        # 1) 收集 Spearman IC 和 IR
         stats: Dict[str, Dict[str, float]] = {}
         for col in df_eval.columns.drop ('forward_return'):
-            # 原始 Spearman IC 可能是 numpy scalar 或 array
             raw_sp = spearmanr (df_eval[col], df_eval['forward_return']).correlation
-            # 强制取第一个元素，保证标量
             sp = float (np.atleast_1d (raw_sp).ravel ()[0])
 
             roll = df_eval[col].rolling (win_eff).corr (df_eval['forward_return'])
-            arr = roll.values
-            valid = arr[~np.isnan (arr)]
-            if valid.size == 0:
-                ir_raw = np.nan
-            else:
-                pm = valid.mean ()
-                ps = valid.std (ddof=0)
-                ir_raw = pm / ps if ps != 0 else np.nan
-            # 同样强制降维
-            ir = float (np.atleast_1d (ir_raw).ravel ()[0])
+            valid = roll.dropna ().values
+            ir = float (valid.mean () / valid.std (ddof=0)) if valid.size else np.nan
 
             stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
 
-        # 2) 计算 PCA 载荷并更新
-        feats = list (stats.keys ())
-        X_sub = (df[feats] - df[feats].mean ()) / df[feats].std ()
+        X_sub = (df[list (stats)] - df[list (stats)].mean ()) / df[list (stats)].std ()
         pca = PCA (n_components=1);
         pca.fit (X_sub)
-        loadings = np.abs (pca.components_[0])
-        for f, ld in zip (feats, loadings):
+        for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
             stats[f]['pca_coeff'] = float (ld)
 
-        # 3) 构建 summary
         summary = pd.DataFrame.from_dict (stats, orient='index')
-
-        # —— 强制转浮点，防止后续非数值 dtype 报错 ——
         for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
-            summary[m] = pd.to_numeric (summary[m], errors='coerce')
-
-        # 4) 归一化 & 合成
-        for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
-            arr = summary[m].dropna ().to_numpy (dtype=float)
-            if arr.size == 0:
-                summary[f'{m}_norm'] = np.nan
-                continue
-
+            arr = summary[m].to_numpy (dtype=float)
             if scaler == 'minmax':
                 mi, ma = arr.min (), arr.max ()
-                if ma == mi:
-                    summary[f'{m}_norm'] = 0.0
-                else:
-                    summary[f'{m}_norm'] = (summary[m] - mi) / (ma - mi)
-            else:  # z-score
+                summary[f'{m}_norm'] = (summary[m] - mi) / (ma - mi) if ma != mi else 0.0
+            else:
                 mu, sd = arr.mean (), arr.std (ddof=0)
-                if sd == 0:
-                    summary[f'{m}_norm'] = 0.0
-                else:
-                    summary[f'{m}_norm'] = (summary[m] - mu) / sd
+                summary[f'{m}_norm'] = (summary[m] - mu) / sd if sd != 0 else 0.0
 
-        # 5) 合成最终得分
         summary['combined_score'] = (
                 summary['spearman_ic_norm']
                 + summary['pearson_ir_norm']
                 + summary['pca_coeff_norm']
         )
-
-        # 6) 排序并选 top_k
         summary = summary.sort_values ('combined_score', ascending=False)
-        if top_k:
+        if top_k: # 只保留 top k 个因子
             summary = summary.head (top_k)
-
-        # 保留小数
-        summary = summary.round (self.decimals)
-
-        self.summary = summary
-        return summary
+            cols_to_keep = ['timestamp'] + summary.index.tolist ()
+            self.df_features = self.df_features[cols_to_keep]
+        self.summary = summary.round (self.decimals)
+        return self.summary
 
     def get_summary (self, sort_by='combined_score', ascending=False) -> pd.DataFrame:
         return self.summary.sort_values (sort_by, ascending=ascending)
@@ -323,8 +282,7 @@ class FactorFactory:
                     max (corr[idx_map[f], idx_map[kf]] for kf in kept)
                     for f in features
                 ]
-                pos = int (np.argmin (max_corrs))
-                kept.append (features.pop (pos))
+                kept.append (features.pop (int (np.argmin (max_corrs))))
 
             sub_df = self.df_features.set_index ('timestamp')[kept]
             newf = self.cross_op (sub_df, mode, n_job, bounded_only)
@@ -332,8 +290,7 @@ class FactorFactory:
             drop_cols = merged.nunique ()[merged.nunique () <= 1].index.tolist ()
             merged = merged.drop (columns=drop_cols).dropna ()
 
-            self.df_features = merged.reset_index ()
-            self.df_features = self.df_features.round (self.decimals)
+            self.df_features = merged.reset_index ().round (self.decimals)
             self.evaluate_factors (**self._eval_kwargs)
 
         return self.df_features

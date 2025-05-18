@@ -15,20 +15,21 @@ import pytz
 import logging
 import signal
 import sys
+
 from datetime import datetime, timedelta
 from collections import defaultdict
+from mpi4py import MPI
 
 import pandas as pd
 
 # UTIL & PREPROCESSING
-from Util import safeLoadCSV
 from DataRequest import fetch_tick_data_last_day
 from Preprocessing import aggregate_tick_to_minute  # 针对单只标的的函数
 
 # ---------------------------------------- 配置参数 ----------------------------------------
 SYMBOLS = ["AAPL", "GOOGL", "TSLA"]
 INTERVAL_KEY = "1min"
-FINNHUB_TOKEN = "your api"
+FINNHUB_TOKEN = "cvop3lhr01qihjtq3uvgcvop3lhr01qihjtq3v00"
 WS_URL = f"wss://ws.finnhub.io?token={FINNHUB_TOKEN}"
 DATA_DIR = "./realtimeData/raw"
 LOG_DIR = "./realtimeData/logs"
@@ -80,15 +81,16 @@ def backfill_initial_interval (symbols, api_key, write_callback):
                 continue
             # 局部排序，保证按 timestamp 升序
             df_minute = df_minute.sort_values ('timestamp')
-            write_callback (symbol, df_minute)
-            logger.info (f"【Backfill】{symbol} 回填完毕，共 {len (df_minute)} 条")
+            duration = write_callback (symbol, df_minute)
+            logger.info (f"【Backfill】{symbol} 回填完毕，共 {len (df_minute)} 条，用时 {duration:.3f} seconds")
         except Exception as e:
             logger.error (f"【Backfill】{symbol} 出错: {e}")
     logger.info ("【Backfill】完成。")
 
 
 def write_callback (symbol, df_minute):
-    """将回填结果写入各自 CSVc"""
+    """将回填结果写入各自 CSV, 返回运行时间"""
+    start = time.time()
     filename = f"{DATA_DIR}/{symbol}_{INTERVAL_KEY}.csv"
     new_file = not os.path.isfile (filename)
     with open (filename, 'a', newline='') as f:
@@ -101,6 +103,62 @@ def write_callback (symbol, df_minute):
             # 格式化 timestamp
             row_dict['timestamp'] = row['timestamp'].strftime ('%Y-%m-%d %H:%M:00')
             writer.writerow (row_dict)
+    end = time.time()
+    duration = end - start
+    return duration
+
+# def write_callback_mpi(symbol, df_minute, data_dir=DATA_DIR, interval_key=INTERVAL_KEY):
+#     """
+#     并行写入 df_minute 到 CSV 文件，使用 mpi4py 的 MPI-IO。返回用时。
+#     """
+#     start = time.time()
+#
+#     comm = MPI.COMM_WORLD
+#     rank = comm.Get_rank()
+#     size = comm.Get_size()
+#
+#     filename = f"{data_dir}/{symbol}_{interval_key}.csv"
+#     # 把列名和每行数据格式化成 CSV 文本
+#     header = ','.join(df_minute.columns) + '\n'
+#     header_bytes = header.encode('utf-8') if rank == 0 else b''
+#
+#     # 每个进程构建自己的数据块（UTF-8 bytes）
+#     lines = []
+#     for _, row in df_minute.iterrows():
+#         row_dict = row.to_dict()
+#         row_dict['timestamp'] = row_dict['timestamp'].strftime('%Y-%m-%d %H:%M:00')
+#         ordered = [str(row_dict[col]) for col in df_minute.columns]
+#         lines.append(','.join(ordered) + '\n')
+#     data_bytes = ''.join(lines).encode('utf-8')
+#     my_size = len(data_bytes) + (len(header_bytes) if rank == 0 else 0)
+#
+#     # 所有进程计算各自写入的全局偏移 offset
+#     # Exscan(prefix sum) 得到前面所有 rank 的 my_size 之和
+#     offset = comm.exscan(my_size)
+#     if rank == 0:
+#         offset = 0
+#
+#     # 所有进程集体打开同一个文件
+#     fh = MPI.File.Open(comm, filename,
+#                        MPI.MODE_CREATE | MPI.MODE_WRONLY)
+#
+#     # rank 0 先写入 header
+#     if rank == 0:
+#         fh.Write_at(0, header_bytes)
+#     comm.Barrier()  # 确保 header 写完
+#
+#     # 计算实际写 data 的偏移：rank 0 已写完 header，所以数据区从 header_len 开始
+#     header_len = len(header_bytes)
+#     data_offset = offset + (header_len if rank == 0 else 0)
+#
+#     # 并行写入各自数据块
+#     fh.Write_at_all(data_offset, data_bytes)
+#
+#     fh.Close()
+#
+#     end = time.time()
+#     duration = end - start
+#     return duration
 
 
 # ---------------------------------------- WebSocket 回调 ----------------------------------------

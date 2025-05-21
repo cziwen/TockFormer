@@ -13,7 +13,7 @@
 </details>
 
 <details>
-<summary>🧠 Feature Engineering — FactorFactory Module (Updated: 2025-05-15)</summary>
+<summary>🧠 Feature Engineering — FactorFactory Module (Updated: 2025-05-20)</summary>
 
 - Usage guide is under folder `Usage_Guide`
 

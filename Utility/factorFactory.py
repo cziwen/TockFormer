@@ -7,6 +7,8 @@ import warnings
 
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+from sklearn.impute import SimpleImputer
 from tqdm import tqdm
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
@@ -289,7 +291,9 @@ class FactorFactory:
             stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
 
         X_sub = (df[list (stats)] - df[list (stats)].mean ()) / df[list (stats)].std ()
-        pca = PCA (n_components=1);
+        imputer = SimpleImputer(strategy='mean')
+        X_sub = imputer.fit_transform (X_sub)
+        pca = PCA (n_components=1)
         pca.fit (X_sub)
         for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
             stats[f]['pca_coeff'] = float (ld)

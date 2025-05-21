@@ -108,7 +108,7 @@ def fetch_tick_data_concurrent (
         symbol: str,
         date_str: str,
         api_key: str,
-        limit: int = 1000,
+        limit: int = 25000,
         page_workers: int = 5,
         sleep_sec: float = 0.0
 ) -> list[dict]:
@@ -170,7 +170,7 @@ def fetch_tick_data (
         start_date: str | datetime,
         end_date: str | datetime,
         api_key: str,
-        limit: int = 10000,
+        limit: int = 25000,
         page_workers: int = 5,
         day_workers: int = 3,
         sleep_sec: float = 0.1

@@ -45,7 +45,7 @@ def aggregate_tick_to_minute (df: pd.DataFrame) -> pd.DataFrame:
     return df_minute.reset_index ()
 
 
-def extract_microstructure_features (g: pd.DataFrame, z: float = 2.5) -> pd.Series:
+def extract_microstructure_features (g: pd.DataFrame, z: float = 2) -> pd.Series:
     price = g['price'].astype (float).values
     volume = g['volume'].astype (float).values
     diffs = np.diff (price)

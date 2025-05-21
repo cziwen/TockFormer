@@ -90,6 +90,8 @@ Project progress is tracked by the four core modules, and part of them are good 
 
 ## ⚡ Quick Start
 
+> *Check out the `Tutorial` folder, and you will know how to use them.*
+
 > **Note:** The environment setup is still evolving. Commonly used libraries include:
 > - `numpy`  
 > - `pandas`  

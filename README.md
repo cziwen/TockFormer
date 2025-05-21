@@ -3,32 +3,26 @@
 #### 🚧 Note: This project is a work in progress and is not yet production-ready.
 
 ---
-## 📌 Log Board (as of 2025-05-16)
+## 📌 Log Board (as of 2025-05-20)
 
 <details>
 <summary>🔌 Real-time Tick Ingestion (Updated: 2025-05-16)</summary>
 
-- ✅ Implemented workable tick-level ingestion module. *(2025-05-05)*  
-- ✅ Built a standalone `launcher.py` script for scheduling pipeline execution over custom time intervals. *(2025-05-14)*  
-- ✅ Enhanced IO throughput using **mpi4py** to parallelize and streamline tick data ingestion. *(2025-05-16)*  
+- Use `Utility/luancher.py` to schedule the ingest program
 
 </details>
 
 <details>
 <summary>🧠 Feature Engineering — FactorFactory Module (Updated: 2025-05-15)</summary>
 
-- ✅ Implemented a **tree-based structure** for automatic factor expansion. *(2025-05-12)*  
-- ✅ Added combined IC+IR score metric (**|Spearman IC| + |Pearson IR|**) to guide factor selection. *(2025-05-13)*  
-- ✅ Enabled bounded cross-operations (e.g., +, −, ×, ÷, sin, cos) with constraints on output stability. *(2025-05-14)*  
-- ✅ Optimized search by pruning correlated factors with a **greedy minimum-correlation selection**. *(2025-05-15)*  
-- 🔄 *(Proposed)* Introduce A* search algorithm for intelligent feature exploration based on IC distance. *(Planned)*  
+- Usage guide is under folder `Usage_Guide`
 
 </details>
 
 <details>
 <summary>🤖 Model Inference (Not yet updated)</summary>
 
-- ⏳ Placeholder for future logs related to model training, validation, and prediction integration. *(To be started after 2025-05-25)*  
+- ⏳ Placeholder for future logs related to model training, validation, and prediction integration.
 - ❌ No updates yet. This module is currently under development.  
 
 </details>
@@ -36,7 +30,7 @@
 <details>
 <summary>💡 Signal Generation (Not yet updated)</summary>
 
-- ⏳ Placeholder for future logs related to trading signal generation, output formatting, and strategy logic. *(To be started after 2025-06-05)*  
+- ⏳ Placeholder for future logs related to trading signal generation, output formatting, and strategy logic.
 - ❌ No updates yet. This module is currently under development.  
 
 </details>

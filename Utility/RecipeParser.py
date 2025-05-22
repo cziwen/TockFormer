@@ -178,6 +178,7 @@
 import re
 from typing import List, Dict, Optional
 import pandas as pd
+from traitlets import Instance
 
 from Utility.registry import build_dispatch
 
@@ -317,59 +318,133 @@ class RecipeParser:
             dfs (r)
         return flat
 
-    def apply_recipes (self, df: pd.DataFrame, recipes: List[Dict], columns_to_keep: Optional[List[str]] = None ) -> pd.DataFrame:
+    # def apply_recipes (self, df: pd.DataFrame, recipes: List[Dict],
+    #                    columns_to_keep: Optional[List[str]] = None) -> pd.DataFrame:
+    #     """
+    #     根据 recipes（已扁平化、按依赖顺序），
+    #     在 df_feat（初始拷贝原 df）上依次生成每个因子列并返回。
+    #     """
+    #     from Utility.factors import CROSS_OPS
+    #     from Utility.registry import FACTOR_REGISTRY
+    #
+    #     # 1) 初始化：先拷贝原始所有列，方便基础因子直接用原始列
+    #     df_feat = df.copy ()
+    #
+    #     # 2) 准备交叉运算符映射
+    #     cross_map = {op['name']: op for op in CROSS_OPS}
+    #
+    #     # 3) 按 recipes 顺序，一个循环搞定所有因子
+    #     if not isinstance (recipes, list):
+    #         recipes = [recipes]
+    #
+    #     for rec in recipes:
+    #         name = rec['name']
+    #         func = rec['func']
+    #         inputs = rec['inputs']  # e.g. ['open'] or ['macd_diff_5_20_(open)']
+    #         kwargs = rec['kwargs']  # e.g. {'window': 14}
+    #
+    #         if func is None:
+    #             continue
+    #
+    #         # --- 基础因子：调用 DataFrame 版函数 ---
+    #         if func in FACTOR_REGISTRY:
+    #             meta = FACTOR_REGISTRY[func]
+    #             df_func = meta['func']
+    #             param_keys = meta['param_keys']
+    #
+    #             # 把单值参数包成列表，对应函数签名里的 list 参数
+    #             df_kwargs = {k: [kwargs[k]] for k in param_keys if k in kwargs}
+    #
+    #             # df_func(self, df, cols:List[str], **params) → Dict[name,Series]
+    #             out = df_func (df_feat, inputs, **df_kwargs)
+    #             # 拿回那个 key 对应的 Series
+    #             df_feat[name] = out[name]
+    #             continue
+    #
+    #         # --- 交叉运算符：sin/mul/div/... ---
+    #         if func in cross_map:
+    #             op_meta = cross_map[func]
+    #             op = op_meta['func']
+    #             arity = op_meta['arity']
+    #
+    #             if arity == 1:
+    #                 df_feat[name] = op (df_feat[inputs[0]])
+    #             else:  # arity == 2
+    #                 df_feat[name] = op (df_feat[inputs[0]], df_feat[inputs[1]])
+    #             continue
+    #
+    #     if columns_to_keep is None:
+    #         columns_to_keep = df.columns.tolist ()
+    #     df_feat = df_feat[columns_to_keep]
+    #
+    #     return df_feat
+
+    def apply_recipes (self, df: pd.DataFrame, recipes: List[Dict],
+                       columns_to_keep: Optional[List[str]] = None) -> pd.DataFrame:
         """
         根据 recipes（已扁平化、按依赖顺序），
         在 df_feat（初始拷贝原 df）上依次生成每个因子列并返回。
+        这里确保每个 recipe 先从它的 subrecipes（叶子节点）计算起，避免 KeyError。
         """
         from Utility.factors import CROSS_OPS
         from Utility.registry import FACTOR_REGISTRY
 
-        # 1) 初始化：先拷贝原始所有列，方便基础因子直接用原始列
+        # 1) 拷贝原始所有列
         df_feat = df.copy ()
 
-        # 2) 准备交叉运算符映射
+        # 2) 交叉算子映射
         cross_map = {op['name']: op for op in CROSS_OPS}
 
-        # 3) 按 recipes 顺序，一个循环搞定所有因子
-        for rec in recipes:
+        # 3) 统一把单个 recipe 转为列表
+        if not isinstance (recipes, list):
+            recipes = [recipes]
+
+        # 4) 递归执行单个 recipe：先处理所有 subrecipes，再执行自己
+        def exec_rec (rec: Dict):
+            # 4.1) 先递归处理子 recipe
+            for sub in rec.get ('subrecipes', []):
+                exec_rec (sub)
+
+            # 4.2) 再处理当前 rec
             name = rec['name']
             func = rec['func']
-            inputs = rec['inputs']  # e.g. ['open'] or ['macd_diff_5_20_(open)']
-            kwargs = rec['kwargs']  # e.g. {'window': 14}
+            inputs = rec['inputs']
+            kwargs = rec['kwargs']
 
+            # 如果 func 是 None，说明只是一个 pass-through 的节点
             if func is None:
-                continue
+                return
 
-            # --- 基础因子：调用 DataFrame 版函数 ---
+            # 调用基础因子函数
             if func in FACTOR_REGISTRY:
                 meta = FACTOR_REGISTRY[func]
                 df_func = meta['func']
                 param_keys = meta['param_keys']
-
-                # 把单值参数包成列表，对应函数签名里的 list 参数
+                # 将每个 param 打包成列表，符合签名
                 df_kwargs = {k: [kwargs[k]] for k in param_keys if k in kwargs}
 
-                # df_func(self, df, cols:List[str], **params) → Dict[name,Series]
                 out = df_func (df_feat, inputs, **df_kwargs)
-                # 拿回那个 key 对应的 Series
                 df_feat[name] = out[name]
-                continue
+                return
 
-            # --- 交叉运算符：sin/mul/div/... ---
+            # 调用交叉算子
             if func in cross_map:
                 op_meta = cross_map[func]
                 op = op_meta['func']
                 arity = op_meta['arity']
-
                 if arity == 1:
                     df_feat[name] = op (df_feat[inputs[0]])
                 else:  # arity == 2
                     df_feat[name] = op (df_feat[inputs[0]], df_feat[inputs[1]])
-                continue
+                return
 
+        # 5) 遍历顶层 recipes
+        for rec in recipes:
+            exec_rec (rec)
+
+        # 6) 如果用户指定了 columns_to_keep，只保留这些列
         if columns_to_keep is None:
-            columns_to_keep = df.columns.tolist()
+            columns_to_keep = df.columns.tolist ()
         df_feat = df_feat[columns_to_keep]
 
         return df_feat

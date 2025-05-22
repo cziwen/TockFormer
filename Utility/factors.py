@@ -1,93 +1,244 @@
+# import pandas as pd
+# import ta
+# import math
+# from Utility.registry import factor
+# from typing import Dict, List
+#
+#
+# # ──────────── operator functions ────────────
+# def mul_func (x, y):    return x * y
+#
+#
+# def minus_func (x, y):  return x - y
+#
+#
+# def div_func (x, y):    return x.div (y.replace (0, pd.NA))
+#
+#
+# def sin_func (x):       return x.map (math.sin)
+#
+#
+# def cos_func (x):       return x.map (math.cos)
+#
+#
+# CROSS_OPS = [
+#     {'name': 'mul', 'arity': 2, 'func': mul_func, 'preserves_bounded': True},
+#     {'name': 'minus', 'arity': 2, 'func': minus_func, 'preserves_bounded': True},
+#     {'name': 'div', 'arity': 2, 'func': div_func, 'preserves_bounded': False},
+#     {'name': 'sin', 'arity': 1, 'func': sin_func, 'preserves_bounded': True},
+#     {'name': 'cos', 'arity': 1, 'func': cos_func, 'preserves_bounded': True},
+# ]
+#
+#
+#
+#
+#
+# # ──────────── Feature functions ──────────── Add your own
+# @factor('bounded')
+# def rsi(
+#         self,
+#         df: pd.DataFrame,
+#         cols: List[str],
+#         windows: List[int] = [6, 10, 14]
+# ) -> Dict[str, pd.Series]:
+#     out: Dict[str, pd.Series] = {}
+#     for w in windows:
+#         for c in cols:
+#             if c not in df.columns:
+#                 continue
+#             key = f"rsi_{w}_({c})"
+#             out[key] = ta.momentum.RSIIndicator(df[c], window=w).rsi()
+#     return out
+#
+#
+# @factor('unbounded')
+# def sma(
+#         self,
+#         df: pd.DataFrame,
+#         cols: List[str],
+#         windows: List[int] = [5, 10, 20]
+# ) -> Dict[str, pd.Series]:
+#     out: Dict[str, pd.Series] = {}
+#     for w in windows:
+#         for c in cols:
+#             if c not in df.columns:
+#                 continue
+#             key = f"sma_{w}_({c})"
+#             out[key] = df[c].rolling(w).mean()
+#     return out
+#
+#
+# @factor('unbounded')
+# def ema(
+#         self,
+#         df: pd.DataFrame,
+#         cols: List[str],
+#         spans: List[int] = [5, 10, 20]
+# ) -> Dict[str, pd.Series]:
+#     out: Dict[str, pd.Series] = {}
+#     for span in spans:
+#         for c in cols:
+#             if c not in df.columns:
+#                 continue
+#             key = f"ema_{span}_({c})"
+#             out[key] = df[c].ewm(span=span).mean()
+#     return out
+#
+#
+# @factor('unbounded')
+# def macd(
+#         self,
+#         df: pd.DataFrame,
+#         cols: List[str],
+#         pairs: List[tuple] = [(12, 26), (5, 20)]
+# ) -> Dict[str, pd.Series]:
+#     out: Dict[str, pd.Series] = {}
+#     for fast, slow in pairs:
+#         for c in cols:
+#             if c not in df.columns:
+#                 continue
+#             macd_ind = ta.trend.MACD(df[c], window_fast=fast, window_slow=slow)
+#             key = f"macd_diff_{fast}_{slow}_({c})"
+#             out[key] = macd_ind.macd_diff()
+#     return out
+#
+#
+# @factor('bounded')
+# def bb_pband(
+#         self,
+#         df: pd.DataFrame,
+#         cols: List[str],
+#         windows: List[int] = [10, 20],
+#         devs: List[float] = [1.5, 2.0]
+# ) -> Dict[str, pd.Series]:
+#     out: Dict[str, pd.Series] = {}
+#     for w in windows:
+#         for dev in devs:
+#             for c in cols:
+#                 if c not in df.columns:
+#                     continue
+#                 bb = ta.volatility.BollingerBands(df[c], window=w, window_dev=dev)
+#                 key = f"bb_pband_{w}_{dev}_({c})"
+#                 out[key] = bb.bollinger_pband()
+#     return out
+
+
 import pandas as pd
 import ta
-from Utility.registry import factor
+import math
+from Utility.registry import factor, FACTOR_REGISTRY
 from typing import Dict, List
 
-# —— 在这里只写因子函数 ——
-@factor('bounded')
-def rsi(
-        self,
+
+# ──────────── operator functions ────────────
+def mul_func (x, y):    return x * y
+
+
+def minus_func (x, y):  return x - y
+
+
+def div_func (x, y):    return x.div (y.replace (0, pd.NA))
+
+
+def sin_func (x):       return x.map (math.sin)
+
+
+def cos_func (x):       return x.map (math.cos)
+
+
+CROSS_OPS = [
+    {'name': 'mul', 'arity': 2, 'func': mul_func, 'preserves_bounded': True},
+    {'name': 'minus', 'arity': 2, 'func': minus_func, 'preserves_bounded': True},
+    {'name': 'div', 'arity': 2, 'func': div_func, 'preserves_bounded': False},
+    {'name': 'sin', 'arity': 1, 'func': sin_func, 'preserves_bounded': True},
+    {'name': 'cos', 'arity': 1, 'func': cos_func, 'preserves_bounded': True},
+]
+
+
+# ──────────── Feature functions ────────────
+@factor (category='bounded', param_keys=['window'])
+def rsi (
         df: pd.DataFrame,
         cols: List[str],
-        windows: List[int] = [6, 10, 14]
+        window: List[int] = [6, 10, 14]
 ) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
-    for w in windows:
+    tpl = FACTOR_REGISTRY['rsi']['key_template']
+    for w in window:
         for c in cols:
-            if c not in df.columns:
-                continue
-            key = f"rsi_{w}_{c}"
-            out[key] = ta.momentum.RSIIndicator(df[c], window=w).rsi()
+            if c not in df.columns: continue
+            key = tpl ([w], c)
+            out[key] = ta.momentum.RSIIndicator (df[c], window=w).rsi ()
     return out
 
 
-@factor('unbounded')
-def sma(
-        self,
+@factor (category='unbounded', param_keys=['window'])
+def sma (
         df: pd.DataFrame,
         cols: List[str],
-        windows: List[int] = [5, 10, 20]
+        window: List[int] = [5, 10, 20]
 ) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
-    for w in windows:
+    tpl = FACTOR_REGISTRY['sma']['key_template']
+    for w in window:
         for c in cols:
-            if c not in df.columns:
-                continue
-            key = f"sma_{w}_{c}"
-            out[key] = df[c].rolling(w).mean()
+            if c not in df.columns: continue
+            key = tpl ([w], c)
+            out[key] = df[c].rolling (w).mean ()
     return out
 
 
-@factor('unbounded')
-def ema(
-        self,
+@factor (category='unbounded', param_keys=['spans'])
+def ema (
         df: pd.DataFrame,
         cols: List[str],
         spans: List[int] = [5, 10, 20]
 ) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
+    tpl = FACTOR_REGISTRY['ema']['key_template']
     for span in spans:
         for c in cols:
-            if c not in df.columns:
-                continue
-            key = f"ema_{span}_{c}"
-            out[key] = df[c].ewm(span=span).mean()
+            if c not in df.columns: continue
+            key = tpl ([span], c)
+            out[key] = df[c].ewm (span=span).mean ()
     return out
 
 
-@factor('unbounded')
-def macd(
-        self,
+@factor (
+    category='unbounded',
+    param_keys=['pairs'],
+    key_template=lambda params, col: f"macd_{params[0]}_{params[1]}_({col})"
+)
+def macd (
         df: pd.DataFrame,
         cols: List[str],
         pairs: List[tuple] = [(12, 26), (5, 20)]
 ) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
+    tpl = FACTOR_REGISTRY['macd']['key_template']
     for fast, slow in pairs:
         for c in cols:
-            if c not in df.columns:
-                continue
-            macd_ind = ta.trend.MACD(df[c], window_fast=fast, window_slow=slow)
-            key = f"macd_diff_{fast}_{slow}_{c}"
-            out[key] = macd_ind.macd_diff()
+            if c not in df.columns: continue
+            key = tpl ([fast, slow], c)
+            macd_ind = ta.trend.MACD (df[c], window_fast=fast, window_slow=slow)
+            out[key] = macd_ind.macd_diff ()
     return out
 
 
-@factor('bounded')
-def bb_pband(
-        self,
+@factor (category='bounded', param_keys=['window', 'std'])
+def bbpband (
         df: pd.DataFrame,
         cols: List[str],
-        windows: List[int] = [10, 20],
-        devs: List[float] = [1.5, 2.0]
+        window: List[int] = [10, 20],
+        std: List[float] = [1.5, 2.0]
 ) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
-    for w in windows:
-        for dev in devs:
+    tpl = FACTOR_REGISTRY['bbpband']['key_template']
+    for w in window:
+        for dev in std:
             for c in cols:
-                if c not in df.columns:
-                    continue
-                bb = ta.volatility.BollingerBands(df[c], window=w, window_dev=dev)
-                key = f"bb_pband_{w}_{dev}_{c}"
-                out[key] = bb.bollinger_pband()
+                if c not in df.columns: continue
+                key = tpl ([w, dev], c)
+                bb = ta.volatility.BollingerBands (df[c], window=w, window_dev=dev)
+                out[key] = bb.bollinger_pband ()
     return out

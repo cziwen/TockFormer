@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import math
 import matplotlib.pyplot as plt
 import umap
 import warnings
@@ -33,33 +32,7 @@ from sklearn.cluster import (
 )
 from sklearn.mixture import GaussianMixture
 
-from Utility.registry import FACTOR_REGISTRY
 from Utility.factors import *
-
-
-# ──────────── operator functions ────────────
-def mul_func (x, y):    return x * y
-
-
-def minus_func (x, y):  return x - y
-
-
-def div_func (x, y):    return x.div (y.replace (0, pd.NA))
-
-
-def sin_func (x):       return x.map (math.sin)
-
-
-def cos_func (x):       return x.map (math.cos)
-
-
-CROSS_OPS = [
-    {'name': 'mul', 'arity': 2, 'func': mul_func, 'preserves_bounded': True},
-    {'name': 'minus', 'arity': 2, 'func': minus_func, 'preserves_bounded': True},
-    {'name': 'div', 'arity': 2, 'func': div_func, 'preserves_bounded': False},
-    {'name': 'sin', 'arity': 1, 'func': sin_func, 'preserves_bounded': True},
-    {'name': 'cos', 'arity': 1, 'func': cos_func, 'preserves_bounded': True},
-]
 
 
 # ================ Pickle Function ================
@@ -158,11 +131,13 @@ class FactorFactory:
 
         new_feats: Dict[str, pd.Series] = {}
         for prefix, info in FACTOR_REGISTRY.items ():
-            tags = info.get ('tags', [])
+            tags = info.get ('category', [])
+            if not isinstance (tags, list):
+                tags = [tags]
             if bounded_only and 'bounded' not in tags:
                 continue
 
-            out = info['func'] (self, df, cols)
+            out = info['func'] (df, cols)
             for key, series in out.items ():
                 # trust the key from factors.py
                 new_feats[key] = pd.Series (series, index=df.index, name=key)
@@ -220,7 +195,7 @@ class FactorFactory:
         for col in data.columns:
             for op in CROSS_OPS:
                 if op['arity'] == 1 and (not bounded_only or op['preserves_bounded']):
-                    feats[f"{op['name']}_{col}"] = op['func'] (data[col])
+                    feats[f"{op['name']}_({col})"] = op['func'] (data[col])
 
         # —— 二元算子构造任务列表 ——
         dd = data.to_dict ('series')

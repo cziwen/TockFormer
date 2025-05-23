@@ -89,16 +89,20 @@ Project progress is tracked by the four core modules, and part of them are good 
 ---
 
 ## ⚡ Quick Start
+#### **1 Set up the Environment**
+```bash
+conda create -n TockFormer python=3.10
+conda activate TockFormer
+```
+#### **2 Install Python Dependencies**
+```bash
+pip install -r requirements.txt
+```
 
 > *Check out the `Tutorial` folder, and you will know how to use them.*
 
-> **Note:** The environment setup is still evolving. Commonly used libraries include:
-> - `numpy`  
-> - `pandas`  
-> - `torch` *(install either the CPU or GPU version depending on your system)*
-> - and many other packages...
 
-### 🔧 Steps to Run:
+### 🔧 To Run the Pipeline:
 1. Open `Utility/AggrData.py` and configure your **Finnhub API token**.  
    - A free token is available at [https://finnhub.io](https://finnhub.io)
 2. Set your preferred **log file** and **CSV output paths** inside the script or via environment variables. 

@@ -314,6 +314,7 @@ def fetch_nbbo_data_concurrent (
                 return []
 
     if total == 0:
+        tqdm.write (f"Nothing fetched at {date_str}")
         return []
 
     skips = list (range (0, total, limit))

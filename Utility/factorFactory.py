@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import umap
 import warnings
+import os
 
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -36,6 +37,58 @@ from Utility.factors import *
 
 
 # ================ Pickle Function ================
+
+def _compute_norm (metric: str, arr: np.ndarray, scaler: str):
+    """
+    返回 (metric, norm_arr)，对全 NaN 或常数情况做保护。
+    """
+    # 先检测整列是否全是 NaN
+    if np.all (np.isnan (arr)):
+        return metric, np.zeros_like (arr)
+
+    if scaler == 'minmax':
+        # 跳过 NaN，计算 min/max
+        mi = np.nanmin (arr)
+        ma = np.nanmax (arr)
+        # 如果最大最小相等，或都为 NaN（nanmin/nanmax 已跳过），填 0
+        if ma == mi:
+            norm = np.zeros_like (arr)
+        else:
+            norm = (arr - mi) / (ma - mi)
+    else:
+        # 跳过 NaN，计算 mean/std
+        mu = np.nanmean (arr)
+        sd = np.nanstd (arr, ddof=0)
+        # 如果 std 为 0，填 0
+        if sd == 0:
+            norm = np.zeros_like (arr)
+        else:
+            norm = (arr - mu) / sd
+
+    # 最后把任何可能残留的 NaN（理论上不应该有）也填成 0
+    norm = np.where (np.isnan (norm), 0.0, norm)
+    return metric, norm
+
+def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
+    raw_sp = spearmanr (df_sub[col], df_sub['forward_return']).correlation
+    sp = float (np.atleast_1d (raw_sp).ravel ()[0])
+
+    roll = df_sub[col].rolling (win_eff).corr (df_sub['forward_return']).dropna ().values
+    # tqdm.write(f"roll.shape = {roll.shape}")
+
+    if roll.size == 0:
+        return col, sp, np.nan
+
+    # 再检查一下：如果全 NaN（dropna 后不可能），或所有值都一样，直接 NaN
+    if np.nanstd (roll, ddof=0) == 0:
+        return col, sp, np.nan
+
+    # 用 nan‐safe 版本
+    mean = np.nanmean (roll)
+    std = np.nanstd (roll, ddof=0)
+    ir = float (mean / std) if std > 0 else np.nan
+    return col, sp, ir
+
 
 def _cross_apply (args):
     op, a, b, data_dict = args
@@ -87,7 +140,8 @@ class FactorFactory:
             window: int = 20,
             scaler: str = 'minmax',
             top_k: Optional[int] = None,
-            decimals: int = 4
+            decimals: int = 6,
+            n_jobs: Optional[int] = None,
     ):
         # 原始数据按 timestamp 索引
         self.df_global = (
@@ -111,6 +165,46 @@ class FactorFactory:
         self.summary = pd.DataFrame ()
         self.cluster_report = pd.DataFrame ()
 
+        if n_jobs is None or n_jobs < 1:
+            n_jobs = os.cpu_count ()
+        self.threadpool = ThreadPoolExecutor (max_workers=n_jobs)
+        self.processpool = ProcessPoolExecutor (max_workers=n_jobs)
+
+    # def apply_registry (
+    #         self,
+    #         df: pd.DataFrame,
+    #         cols: List[str],
+    #         bounded_only: bool = False
+    # ) -> pd.DataFrame:
+    #     """
+    #     对传入的 df（必须有 timestamp 索引）按列依次执行 FACTOR_REGISTRY
+    #     中注册的所有 func。因子函数自行命名 out[key]，这里直接汇总。
+    #     """
+    #     # 备份原属性
+    #     orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
+    #
+    #     # 临时替换
+    #     self.df_global = df.copy ()
+    #     self.base_cols = cols.copy ()
+    #     self.target_col = self.target_col if self.target_col in df.columns else None
+    #
+    #     new_feats: Dict[str, pd.Series] = {}
+    #     for prefix, info in FACTOR_REGISTRY.items ():
+    #         tags = info.get ('category', [])
+    #         if not isinstance (tags, list):
+    #             tags = [tags]
+    #         if bounded_only and 'bounded' not in tags:
+    #             continue
+    #
+    #         out = info['func'] (df, cols)
+    #         for key, series in out.items ():
+    #             # trust the key from factors.py
+    #             new_feats[key] = pd.Series (series, index=df.index, name=key)
+    #
+    #     # 恢复原属性
+    #     self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
+    #     return pd.DataFrame (new_feats, index=df.index)
+
     def apply_registry (
             self,
             df: pd.DataFrame,
@@ -118,8 +212,8 @@ class FactorFactory:
             bounded_only: bool = False
     ) -> pd.DataFrame:
         """
-        对传入的 df（必须有 timestamp 索引）按列依次执行 FACTOR_REGISTRY
-        中注册的所有 func。因子函数自行命名 out[key]，这里直接汇总。
+        多线程版本：对传入的 df（必须有 timestamp 索引），按列并行执行 FACTOR_REGISTRY 中的 func，
+        每个线程只负责一个 (prefix, col) 组合。
         """
         # 备份原属性
         orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
@@ -130,16 +224,32 @@ class FactorFactory:
         self.target_col = self.target_col if self.target_col in df.columns else None
 
         new_feats: Dict[str, pd.Series] = {}
+        tasks = []
         for prefix, info in FACTOR_REGISTRY.items ():
             tags = info.get ('category', [])
             if not isinstance (tags, list):
                 tags = [tags]
             if bounded_only and 'bounded' not in tags:
                 continue
+            # 对每个 col 单独提交一个任务
+            for col in cols:
+                tasks.append ((prefix, info['func'], col))
 
-            out = info['func'] (df, cols)
+        # def _apply_one (prefix, func, col):
+        #     # 调用因子函数，只传入当前这一列
+        #     out = func (df, [col])
+        #     # 返回当前 prefix+col 下所有生成的 (name, series) 项
+        #     return out
+
+        # 多进程执行
+        future_to_task = {
+            self.processpool.submit (func, df[[col]], [col]): (prefix, col)
+            for prefix, func, col in tasks
+        }
+        for fut in tqdm (as_completed (future_to_task), total=len (future_to_task), desc='Applying Factors'):
+            out = fut.result ()
+            # 将结果收集到 new_feats
             for key, series in out.items ():
-                # trust the key from factors.py
                 new_feats[key] = pd.Series (series, index=df.index, name=key)
 
         # 恢复原属性
@@ -164,12 +274,14 @@ class FactorFactory:
         cross_df = self.cross_op (feat_df, mode, n_job, bounded_only)
 
         # 3) 合并 & 清洗
+        feat_df = feat_df.round (self.decimals)
+        cross_df = cross_df.round (self.decimals)
         merged = pd.concat ([feat_df, cross_df], axis=1)
         drop_cols = merged.nunique ()[merged.nunique () <= 1].index.tolist ()
         df_feat = merged.drop (columns=drop_cols).dropna ()
 
         # 4) 存储 & 评估
-        self.df_features = df_feat.reset_index ().round (self.decimals)
+        self.df_features = df_feat.reset_index ()
         self.evaluate_factors (**self._eval_kwargs)
         return self.df_features
 
@@ -220,16 +332,14 @@ class FactorFactory:
             comm.Barrier ()
 
         elif mode == 'process':
-            with ProcessPoolExecutor (max_workers=n_job) as exe:
-                for name, series in tqdm (exe.map (_cross_apply, tasks),
-                                          total=len (tasks), desc="🔄 cross_op (proc)"):
-                    feats[name] = series
+            for name, series in tqdm (self.processpool.map (_cross_apply, tasks),
+                                      total=len (tasks), desc="🔄 cross_op (proc)"):
+                feats[name] = series
 
         elif mode == 'thread':
-            with ThreadPoolExecutor (max_workers=n_job) as exe:
-                for name, series in tqdm (exe.map (_cross_apply, tasks),
-                                          total=len (tasks), desc="🔄 cross_op (thread)"):
-                    feats[name] = series
+            for name, series in tqdm (self.threadpool.map (_cross_apply, tasks),
+                                      total=len (tasks), desc="🔄 cross_op (thread)"):
+                feats[name] = series
 
         else:  # single
             for t in tqdm (tasks, total=len (tasks), desc="🔄 cross_op (single)"):
@@ -240,6 +350,69 @@ class FactorFactory:
         df_new.index.name = 'timestamp'
         return df_new
 
+    # def evaluate_factors (
+    #         self,
+    #         forward_period: int,
+    #         window: int,
+    #         scaler: str = 'minmax',
+    #         top_k: Optional[int] = None
+    # ) -> pd.DataFrame:
+    #     df = self.df_features.set_index ('timestamp')
+    #     price = self.df_global[self.target_col]
+    #     returns = price.shift (-forward_period) / price - 1
+    #     df_eval = df.join (returns.rename ('forward_return')).dropna ()
+    #
+    #     win_eff = min (window, max (1, len (df_eval) - 1))
+    #
+    #     stats: Dict[str, Dict[str, float]] = {}
+    #     for col in df_eval.columns.drop ('forward_return'):
+    #         if df_eval[col].nunique () <= 1:
+    #             continue
+    #         raw_sp = spearmanr (df_eval[col], df_eval['forward_return']).correlation
+    #         sp = float (np.atleast_1d (raw_sp).ravel ()[0])
+    #
+    #         roll = df_eval[col].rolling (win_eff).corr (df_eval['forward_return'])
+    #         valid = roll.dropna ().values
+    #         valid_mean = valid.mean ()
+    #         valid_std = valid.std (ddof=0)
+    #         if valid_std == 0:
+    #             ir = np.nan
+    #         else:
+    #             ir = float (valid_mean / valid_std)
+    #
+    #         stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
+    #
+    #     X_sub = (df[list (stats)] - df[list (stats)].mean ()) / df[list (stats)].std ()
+    #     imputer = SimpleImputer (strategy='mean')
+    #     X_sub = imputer.fit_transform (X_sub)
+    #     pca = PCA (n_components=1)
+    #     pca.fit (X_sub)
+    #     for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
+    #         stats[f]['pca_coeff'] = float (ld)
+    #
+    #     summary = pd.DataFrame.from_dict (stats, orient='index')
+    #     for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
+    #         arr = summary[m].to_numpy (dtype=float)
+    #         if scaler == 'minmax':
+    #             mi, ma = arr.min (), arr.max ()
+    #             summary[f'{m}_norm'] = (summary[m] - mi) / (ma - mi) if ma != mi else 0.0
+    #         else:
+    #             mu, sd = arr.mean (), arr.std (ddof=0)
+    #             summary[f'{m}_norm'] = (summary[m] - mu) / sd if sd != 0 else 0.0
+    #
+    #     summary['combined_score'] = (
+    #             summary['spearman_ic_norm']
+    #             + summary['pearson_ir_norm']
+    #             + summary['pca_coeff_norm']
+    #     )
+    #     summary = summary.sort_values ('combined_score', ascending=False)
+    #     if top_k:  # 只保留 top k 个因子
+    #         summary = summary.head (top_k)
+    #         cols_to_keep = ['timestamp'] + summary.index.tolist ()
+    #         self.df_features = self.df_features[cols_to_keep]
+    #     self.summary = summary.round (self.decimals)
+    #     return self.summary
+
     def evaluate_factors (
             self,
             forward_period: int,
@@ -247,6 +420,11 @@ class FactorFactory:
             scaler: str = 'minmax',
             top_k: Optional[int] = None
     ) -> pd.DataFrame:
+        """
+        多线程版本的 evaluate_factors：对每个因子列并行计算 Spearman IC 和滚动 IR，
+        然后在主线程中执行 PCA 权重提取和归一化 / 排序 / 截取 top_k。
+        """
+        # 1. 准备评估 DataFrame
         df = self.df_features.set_index ('timestamp')
         price = self.df_global[self.target_col]
         returns = price.shift (-forward_period) / price - 1
@@ -254,34 +432,58 @@ class FactorFactory:
 
         win_eff = min (window, max (1, len (df_eval) - 1))
 
+        # 2. 枚举待评估的列
+        cols = [
+            c for c in df_eval.columns
+            if c != 'forward_return' and df_eval[c].nunique () > 1
+        ]
+
+        # 3. 并行计算每列的 spearman_ic 和 pearson_ir
         stats: Dict[str, Dict[str, float]] = {}
-        for col in df_eval.columns.drop ('forward_return'):
-            raw_sp = spearmanr (df_eval[col], df_eval['forward_return']).correlation
-            sp = float (np.atleast_1d (raw_sp).ravel ()[0])
-
-            roll = df_eval[col].rolling (win_eff).corr (df_eval['forward_return'])
-            valid = roll.dropna ().values
-            ir = float (valid.mean () / valid.std (ddof=0)) if valid.size else np.nan
-
+        futures = {self.processpool.submit (_compute_one, df_eval[[c, 'forward_return']], c, win_eff): c for c in cols}
+        for fut in tqdm (as_completed (futures), total=len (futures), desc='Evaluating'):
+            col, sp, ir = fut.result ()
             stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
 
-        X_sub = (df[list (stats)] - df[list (stats)].mean ()) / df[list (stats)].std ()
-        imputer = SimpleImputer(strategy='mean')
-        X_sub = imputer.fit_transform (X_sub)
+        # 4. PCA 权重提取
+        feat = df[list (stats)]
+
+        # 4.1 计算各列的均值和标准差（跳过 NaN）
+        means = feat.mean (skipna=True).astype (float)
+        stds = feat.std (ddof=0, skipna=True).astype (float)
+
+        # 4.2 将 std=0 或 NaN 的列替换成 1，避免除 0
+        stds = stds.replace (0, 1).fillna (1.0).astype (float)
+
+        # 4.3.2 标准化并把所有 NaN 填成 0
+        tmp = feat.sub (means).div (stds)
+        # 4.3.2) 直接转为 float ndarray
+        arr = tmp.to_numpy (dtype=float)
+        # 4.3.3) 在 ndarray 上把所有 NaN 变成 0
+        arr = np.nan_to_num (arr, nan=0.0)
+        # 4.3.4) 赋回 X_sub
+        X_sub = arr
+
+        # 4.4 做 PCA
         pca = PCA (n_components=1)
         pca.fit (X_sub)
         for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
             stats[f]['pca_coeff'] = float (ld)
 
+        # 5. 构建 summary 并归一化
         summary = pd.DataFrame.from_dict (stats, orient='index')
-        for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
+
+        # --- 并行归一化 ---
+        metrics = ['spearman_ic', 'pearson_ir', 'pca_coeff']
+        futures = {}
+        for m in metrics:
             arr = summary[m].to_numpy (dtype=float)
-            if scaler == 'minmax':
-                mi, ma = arr.min (), arr.max ()
-                summary[f'{m}_norm'] = (summary[m] - mi) / (ma - mi) if ma != mi else 0.0
-            else:
-                mu, sd = arr.mean (), arr.std (ddof=0)
-                summary[f'{m}_norm'] = (summary[m] - mu) / sd if sd != 0 else 0.0
+            futures[self.processpool.submit (_compute_norm, m, arr, scaler)] = m
+
+        for fut in tqdm (as_completed (futures), total=len (futures), desc='Normalizing'):
+            m = futures[fut]
+            _, norm_arr = fut.result ()
+            summary[f'{m}_norm'] = norm_arr
 
         summary['combined_score'] = (
                 summary['spearman_ic_norm']
@@ -289,10 +491,15 @@ class FactorFactory:
                 + summary['pca_coeff_norm']
         )
         summary = summary.sort_values ('combined_score', ascending=False)
-        if top_k:  # 只保留 top k 个因子
-            summary = summary.head (top_k)
-            cols_to_keep = ['timestamp'] + summary.index.tolist ()
+
+        # 6. 只保留 top_k
+        if top_k:
+            top = summary.head (top_k)
+            cols_to_keep = ['timestamp'] + top.index.tolist ()
             self.df_features = self.df_features[cols_to_keep]
+            summary = top
+
+        # 7. 存储并返回
         self.summary = summary.round (self.decimals)
         return self.summary
 
@@ -355,9 +562,6 @@ class FactorFactory:
           - umap_components: UMAP→t-SNE 首步输出维度（整型），或 None 跳过该方案；
           - n_jobs:     并行线程数…
         """
-
-        import os
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         # ——— 1. 提取已生成的特征矩阵 & 时间索引 ———
         df_feat = self.df_features.copy ()
         timestamps = df_feat['timestamp']
@@ -394,8 +598,8 @@ class FactorFactory:
             (f'UMAP({umap_components})→t-SNE', umap_components),
         ]
         results = {}
+
         # 并行计算降维
-        n_workers = n_jobs or os.cpu_count ()
 
         def _compute (item):
             name, algo = item
@@ -413,11 +617,10 @@ class FactorFactory:
                 Z = algo.fit_transform (V)
             return name, Z
 
-        with ThreadPoolExecutor (max_workers=n_workers) as executor:
-            futures = {executor.submit (_compute, item): item for item in reducers}
-            for fut in tqdm (as_completed (futures), total=len (futures), desc="🔄 并行降维"):
-                name, Z = fut.result ()
-                results[name] = Z
+        futures = {self.threadpool.submit (_compute, item): item for item in reducers}
+        for fut in tqdm (as_completed (futures), total=len (futures), desc="🔄 并行降维"):
+            name, Z = fut.result ()
+            results[name] = Z
 
         # ——— 6. 绘图（2x3 网格，使用 constrained_layout） ———
         fig, axes = plt.subplots (2, 3, figsize=(18, 10), constrained_layout=True)
@@ -565,19 +768,18 @@ class FactorFactory:
             X = reducer.fit_transform (X)
 
         # 并行评估
-        Executor = ThreadPoolExecutor if backend == 'thread' else ProcessPoolExecutor
         tasks = [(name, Est, params, X, metrics)
                  for name, Est in to_run.items ()
                  for params in ParameterGrid (grids.get (name, {}))]
         records = []
-        with Executor (max_workers=n_jobs) as executor:
-            futures = {executor.submit (_evaluate_clustering_task, *task): task for task in tasks}
-            iterator = as_completed (futures)
-            iterator = tqdm (iterator, total=len (futures), desc='Clustering eval')
-            for fut in iterator:
-                rec = fut.result ()
-                if rec:
-                    records.append (rec)
+
+        futures = {self.threadpool.submit (_evaluate_clustering_task, *task): task for task in tasks}
+        iterator = as_completed (futures)
+        iterator = tqdm (iterator, total=len (futures), desc='Clustering eval')
+        for fut in iterator:
+            rec = fut.result ()
+            if rec:
+                records.append (rec)
 
         df_eval = pd.DataFrame.from_records (records)
         self.cluster_eval_ = df_eval.drop (columns=['_labels'], errors='ignore')

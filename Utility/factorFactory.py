@@ -1,19 +1,21 @@
+import time
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import umap
 import warnings
 import os
+import gc
+import shutil
 
 from typing import List, Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
-from sklearn.impute import SimpleImputer
 from tqdm import tqdm
 from scipy.stats import spearmanr
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, IncrementalPCA
 from sklearn.manifold import LocallyLinearEmbedding, TSNE
-from mpi4py import MPI
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import (
@@ -34,9 +36,37 @@ from sklearn.cluster import (
 from sklearn.mixture import GaussianMixture
 
 from Utility.factors import *
+from Utility.IOcache import dump_dataframe, load_dataframe, wash, delete_parquet_files
 
 
 # ================ Pickle Function ================
+
+def _evaluate_factor_task_streaming(cache_dir: str, fname: str, win_eff: int, fr:pd.Series):
+    """
+    Module-level helper to compute Spearman IC and Pearson IR for a single factor column.
+    """
+    path = os.path.join(cache_dir, fname)
+    df = pd.read_parquet(path)
+    col = df.columns[0]
+    series = df[col]
+
+    # Align and drop NaNs
+    series = series.reindex(fr.index)
+    sub = pd.DataFrame({col: series, 'forward_return': fr}).dropna()
+
+    # Spearman IC
+    raw_sp = spearmanr(sub[col], sub['forward_return']).correlation
+    sp = float(np.atleast_1d(raw_sp).ravel()[0])
+
+    # Rolling IR
+    roll = sub[col].rolling(win_eff).corr(sub['forward_return']).dropna().values
+    if roll.size == 0 or np.nanstd(roll, ddof=0) == 0:
+        ir = np.nan
+    else:
+        ir = float(np.nanmean(roll) / np.nanstd(roll, ddof=0))
+
+    return col, sp, ir
+
 
 def _compute_norm (metric: str, arr: np.ndarray, scaler: str):
     """
@@ -69,6 +99,7 @@ def _compute_norm (metric: str, arr: np.ndarray, scaler: str):
     norm = np.where (np.isnan (norm), 0.0, norm)
     return metric, norm
 
+
 def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
     raw_sp = spearmanr (df_sub[col], df_sub['forward_return']).correlation
     sp = float (np.atleast_1d (raw_sp).ravel ()[0])
@@ -91,9 +122,9 @@ def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
 
 
 def _cross_apply (args):
-    op, a, b, data_dict = args
+    op, a, b, arr_a, arr_b = args
     name = f"{a}_{op['name']}_{b}"
-    return name, op['func'] (data_dict[a], data_dict[b])
+    return name, op['func'] (arr_a, arr_b)
 
 
 def _evaluate_clustering_task (algo_name, Est, params, X, metrics):
@@ -142,13 +173,28 @@ class FactorFactory:
             top_k: Optional[int] = None,
             decimals: int = 6,
             n_jobs: Optional[int] = None,
+            use_disk_cache: bool = True,
+            cache_dir: str = './tmp',
     ):
+        # === 多线程配置 ===
+        if n_jobs is None or n_jobs < 1:
+            n_jobs = os.cpu_count ()
+        self.n_jobs = n_jobs
+
+        # === 磁盘缓存配置 ===
+        self.use_disk_cache = use_disk_cache
+        self.cache_dir = cache_dir
+
+
         # 原始数据按 timestamp 索引
         self.df_global = (
             df.copy ()
             .sort_values ('timestamp')
             .set_index ('timestamp')
         )
+        self.df_global_path = f'{cache_dir}/df_global'
+        dump_dataframe(self.df_global, self.df_global_path, clear=True) # 磁盘化
+
         self.base_cols = (
             base_cols if base_cols is not None
             else [c for c in self.df_global.select_dtypes (include=[np.number]).columns]
@@ -161,67 +207,34 @@ class FactorFactory:
             top_k=top_k
         )
         self.decimals = decimals
+
+        self.df_features_path = f'{cache_dir}/df_features'
         self.df_features = pd.DataFrame ()
+        dump_dataframe(self.df_features, self.df_features_path, clear=True)
+
         self.summary = pd.DataFrame ()
+
         self.cluster_report = pd.DataFrame ()
 
-        if n_jobs is None or n_jobs < 1:
-            n_jobs = os.cpu_count ()
-        self.threadpool = ThreadPoolExecutor (max_workers=n_jobs)
-        self.processpool = ProcessPoolExecutor (max_workers=n_jobs)
-
-    # def apply_registry (
-    #         self,
-    #         df: pd.DataFrame,
-    #         cols: List[str],
-    #         bounded_only: bool = False
-    # ) -> pd.DataFrame:
-    #     """
-    #     对传入的 df（必须有 timestamp 索引）按列依次执行 FACTOR_REGISTRY
-    #     中注册的所有 func。因子函数自行命名 out[key]，这里直接汇总。
-    #     """
-    #     # 备份原属性
-    #     orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
-    #
-    #     # 临时替换
-    #     self.df_global = df.copy ()
-    #     self.base_cols = cols.copy ()
-    #     self.target_col = self.target_col if self.target_col in df.columns else None
-    #
-    #     new_feats: Dict[str, pd.Series] = {}
-    #     for prefix, info in FACTOR_REGISTRY.items ():
-    #         tags = info.get ('category', [])
-    #         if not isinstance (tags, list):
-    #             tags = [tags]
-    #         if bounded_only and 'bounded' not in tags:
-    #             continue
-    #
-    #         out = info['func'] (df, cols)
-    #         for key, series in out.items ():
-    #             # trust the key from factors.py
-    #             new_feats[key] = pd.Series (series, index=df.index, name=key)
-    #
-    #     # 恢复原属性
-    #     self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
-    #     return pd.DataFrame (new_feats, index=df.index)
+        del self.df_global
 
     def apply_registry (
             self,
             df: pd.DataFrame,
             cols: List[str],
-            bounded_only: bool = False
+            bounded_only: bool = False,
     ) -> pd.DataFrame:
         """
-        多线程版本：对传入的 df（必须有 timestamp 索引），按列并行执行 FACTOR_REGISTRY 中的 func，
+        对传入的 df（必须有 timestamp 索引），按列并行执行 FACTOR_REGISTRY 中的 func，
         每个线程只负责一个 (prefix, col) 组合。
         """
-        # 备份原属性
-        orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
-
-        # 临时替换
-        self.df_global = df.copy ()
-        self.base_cols = cols.copy ()
-        self.target_col = self.target_col if self.target_col in df.columns else None
+        # # 备份原属性 （取消）
+        # orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
+        #
+        # # 临时替换
+        # self.df_global = df.copy ()
+        # self.base_cols = cols.copy ()
+        # self.target_col = self.target_col if self.target_col in df.columns else None
 
         new_feats: Dict[str, pd.Series] = {}
         tasks = []
@@ -235,254 +248,282 @@ class FactorFactory:
             for col in cols:
                 tasks.append ((prefix, info['func'], col))
 
-        # def _apply_one (prefix, func, col):
-        #     # 调用因子函数，只传入当前这一列
-        #     out = func (df, [col])
-        #     # 返回当前 prefix+col 下所有生成的 (name, series) 项
-        #     return out
-
         # 多进程执行
-        future_to_task = {
-            self.processpool.submit (func, df[[col]], [col]): (prefix, col)
-            for prefix, func, col in tasks
-        }
-        for fut in tqdm (as_completed (future_to_task), total=len (future_to_task), desc='Applying Factors'):
-            out = fut.result ()
-            # 将结果收集到 new_feats
-            for key, series in out.items ():
-                new_feats[key] = pd.Series (series, index=df.index, name=key)
+        with ProcessPoolExecutor (max_workers=self.n_jobs) as executor:
+            future_to_task = {
+                executor.submit (func, df[[col]], [col]): (prefix, col)
+                for prefix, func, col in tasks
+            }
+            for fut in tqdm (as_completed (future_to_task), total=len (future_to_task), desc='Applying Factors'):
+                out = fut.result ()
+                # 将结果收集到 new_feats
+                for key, series in out.items ():
+                    new_feats[key] = pd.Series (series, index=df.index, name=key)
 
-        # 恢复原属性
-        self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
-        return pd.DataFrame (new_feats, index=df.index)
+        # 恢复原属性 (取消)
+        # self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
+        reg_df = pd.DataFrame (new_feats, index=df.index)
 
-    def generate_factors (
-            self,
-            mode: str = 'single',
-            n_job: Optional[int] = None,
-            bounded_only: bool = False
-    ) -> pd.DataFrame:
-        # 1) 一阶因子
-        feat_df = self.apply_registry (
-            df=self.df_global,
-            cols=self.base_cols,
-            bounded_only=bounded_only
-        )
-        feat_df.index.name = 'timestamp'
+        # if self.use_disk_cache and not on_memory:
+            # def _write_parquet (name_series): # （取消）
+            #     name, series = name_series
+            #     path = os.path.join (self.cache_dir, f"{name}.parquet")
+            #     series.to_frame (name).to_parquet (path)
+            #
+            # # 准备所有要写入的 (name, series)
+            # items = list (reg_df.items ())
+            # # 并行写盘
+            # with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
+            #     futures = [executor.submit (_write_parquet, item) for item in items]
+            #     for fut in tqdm (as_completed (futures), total=len (futures), desc='IO'):
+            #         fut.result ()  # 抛出可能的异常
+            # return pd.DataFrame ()
 
-        # 2) 交叉特征
-        cross_df = self.cross_op (feat_df, mode, n_job, bounded_only)
+        return reg_df
 
-        # 3) 合并 & 清洗
-        feat_df = feat_df.round (self.decimals)
-        cross_df = cross_df.round (self.decimals)
-        merged = pd.concat ([feat_df, cross_df], axis=1)
-        drop_cols = merged.nunique ()[merged.nunique () <= 1].index.tolist ()
-        df_feat = merged.drop (columns=drop_cols).dropna ()
+    def generate_factors (self, mode: str = 'single', bounded_only: bool = False):
+        """
+        Generate and evaluate uni- and cross-features, with optional disk caching.
+        """
 
-        # 4) 存储 & 评估
-        self.df_features = df_feat.reset_index ()
+        # 读取原始df
+        self.df_global = load_dataframe(self.df_global_path)
+
+        # Compute cross features
+        self._get_cross_features (self.df_global, mode, bounded_only)
+
+        del self.df_global
+
+
+        # clean
+        # df_feat = self._merge_clean_round ([cross_df])
+        wash(self.df_features_path)
+
+
+        # 3) Store and evaluate
+        # self.df_features = df_feat.reset_index ()
         self.evaluate_factors (**self._eval_kwargs)
-        return self.df_features
+        # return self.df_features
+
+    def _get_cross_features (self, feat_df: pd.DataFrame, mode: str, bounded_only: bool) -> pd.DataFrame:
+        """
+        Compute second-order (cross) features, optionally using disk cache.
+        """
+        if self.use_disk_cache:
+            # Compute and cache merged features
+            df_all = self.cross_op (feat_df, mode, bounded_only)
+            return df_all
+
+        # In-memory cross features
+        return self.cross_op (feat_df, mode, bounded_only)
 
     def cross_op (
             self,
             input_df: pd.DataFrame,
             mode: str = 'single',
-            n_job: Optional[int] = None,
             bounded_only: bool = False
     ) -> pd.DataFrame:
         data = input_df.copy ()
         feats: Dict[str, pd.Series] = {}
+        file_map: Dict[str, str] = {}
 
-        # —— 一阶因子 on 子集 ——
+        # —— 一阶因子 ——
         reg_df = self.apply_registry (
             df=data,
             cols=list (data.columns),
-            bounded_only=bounded_only
+            bounded_only=bounded_only,
         )
-        feats.update (reg_df.to_dict ('series'))
+
+        if self.use_disk_cache:
+            dump_dataframe(reg_df, self.df_features_path) # 磁盘化
+            del reg_df
+        else:
+            feats.update (reg_df.to_dict ('series'))
 
         # —— 一元算子 ——
+        unary_tasks = []
         for col in data.columns:
             for op in CROSS_OPS:
                 if op['arity'] == 1 and (not bounded_only or op['preserves_bounded']):
-                    feats[f"{op['name']}_({col})"] = op['func'] (data[col])
+                    name = f"{op['name']}_({col})"
+                    func = op['func']
+                    arr = data[col].values
+                    unary_tasks.append ((name, func, arr))
+
+        def _process_unary (task):
+            name, func, arr = task
+            series = pd.Series (func (arr), name=name)
+            series.index = data.index
+            return name, series
+
+        compute_pool = ThreadPoolExecutor (max_workers=self.n_jobs)
+
+        compute_futs = {compute_pool.submit (_process_unary, t): t for t in unary_tasks}
+
+        unary_futures: Dict[str, pd.Series] = {}
+        for fut in tqdm(as_completed(compute_futs), total=len (compute_futs), desc='🔄 Unary op'):
+            name, series = fut.result ()
+            unary_futures[name] = series
+
+        dump_dataframe(pd.DataFrame(unary_futures, index=data.index), self.df_features_path)
+        del unary_futures
+
+        # 等待所有线程池任务完成 (取消)
+        compute_pool.shutdown (wait=True)
+        gc.collect ()
+
+
 
         # —— 二元算子构造任务列表 ——
         dd = data.to_dict ('series')
         tasks = [
-            (op, a, b, dd)
+            (op, a, b, dd[a].values, dd[b].values)
             for op in CROSS_OPS
             if op['arity'] == 2 and (not bounded_only or op['preserves_bounded'])
             for a in data.columns for b in data.columns
         ]
 
-        # 并行或串行执行
-        if mode == 'mpi':
-            comm = MPI.COMM_WORLD
-            size, rank = comm.Get_size (), comm.Get_rank ()
-            local = [t for i, t in enumerate (tasks) if i % size == rank]
-            local_res = dict (_cross_apply (t) for t in local)
-            all_res = comm.gather (local_res, root=0)
-            if rank == 0:
-                merged = {}
-                for d in all_res: merged.update (d)
-                feats.update (merged)
-            comm.Barrier ()
+        if mode == 'thread':
+            batch_size = (self.n_jobs or os.cpu_count ()) * 4
+            idx = 0
+            total = len (tasks)
+            pbar = tqdm (total=total, desc="🔄 cross op (thread)")
+            pending = set ()
+            io_futures = set ()
 
-        elif mode == 'process':
-            for name, series in tqdm (self.processpool.map (_cross_apply, tasks),
-                                      total=len (tasks), desc="🔄 cross_op (proc)"):
-                feats[name] = series
+            # 用于批量写盘的缓存和线程池
+            io_pool = ThreadPoolExecutor (max_workers=self.n_jobs)
+            with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
+                # 初始提交 batch_size 个计算任务
+                while idx < total and len (pending) < batch_size:
+                    pending.add (executor.submit (_cross_apply, tasks[idx]))
+                    idx += 1
 
-        elif mode == 'thread':
-            for name, series in tqdm (self.threadpool.map (_cross_apply, tasks),
-                                      total=len (tasks), desc="🔄 cross_op (thread)"):
-                feats[name] = series
+                # 循环，直到所有计算任务完成
+                while pending:
+                    done, pending = wait (pending, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        name, series = fut.result ()
+                        series.index = data.index
+                        if self.use_disk_cache:
+                            path = os.path.join (self.df_features_path, f"{name}.parquet")
+                            # 提交写盘
+                            io_futures.add (io_pool.submit (
+                                lambda s=series, p=path, n=name: s.to_frame (n).to_parquet (p)
+                            ))
+                            file_map[name] = path
+                            del series
+                        else:
+                            feats[name] = series
+                        pbar.update (1)
+                        # 保持滑动窗口大小
+                        if idx < total:
+                            pending.add (executor.submit (_cross_apply, tasks[idx]))
+                            idx += 1
+
+                        # 如果写盘队列过长，就等最先完成的一批回来
+                        if len (io_futures) >= batch_size:
+                            done_io, io_futures = wait (io_futures, return_when=FIRST_COMPLETED)
+
+                        # 如果达到一个批次，或计算全完成，回收垃圾
+                        if idx % batch_size == 0 or not pending:
+                            gc.collect ()
+            pbar.close ()
+            io_pool.shutdown (wait=True)
+
 
         else:  # single
             for t in tqdm (tasks, total=len (tasks), desc="🔄 cross_op (single)"):
                 name, series = _cross_apply (t)
                 feats[name] = series
 
+
+        # === 如果开启磁盘缓存，最后一次性合并所有 parquet 文件 ===
+        if self.use_disk_cache:
+            # # 找出所有 parquet 文件路径 (取消)
+            # paths = [
+            #     os.path.join (self.cache_dir, f)
+            #     for f in os.listdir (self.cache_dir)
+            #     if f.endswith ('.parquet')
+            # ]
+            # # 并行读取 parquet
+            # df_list = []
+            # with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
+            #     futures = {executor.submit (pd.read_parquet, p): p for p in paths}
+            #     for fut in tqdm (as_completed (futures), total=len (paths), desc="IO"):
+            #         df_list.append (fut.result ())
+            # # 合并并清理缓存目录
+            # merged = pd.concat (df_list, axis=1)
+            # shutil.rmtree (self.cache_dir)
+
+            # merged = load_dataframe(self.df_features_path)
+            # return merged
+            return pd.DataFrame () # 占位符
+
         df_new = pd.DataFrame (feats).reindex (data.index)
         df_new.index.name = 'timestamp'
         return df_new
 
-    # def evaluate_factors (
-    #         self,
-    #         forward_period: int,
-    #         window: int,
-    #         scaler: str = 'minmax',
-    #         top_k: Optional[int] = None
-    # ) -> pd.DataFrame:
-    #     df = self.df_features.set_index ('timestamp')
-    #     price = self.df_global[self.target_col]
-    #     returns = price.shift (-forward_period) / price - 1
-    #     df_eval = df.join (returns.rename ('forward_return')).dropna ()
-    #
-    #     win_eff = min (window, max (1, len (df_eval) - 1))
-    #
-    #     stats: Dict[str, Dict[str, float]] = {}
-    #     for col in df_eval.columns.drop ('forward_return'):
-    #         if df_eval[col].nunique () <= 1:
-    #             continue
-    #         raw_sp = spearmanr (df_eval[col], df_eval['forward_return']).correlation
-    #         sp = float (np.atleast_1d (raw_sp).ravel ()[0])
-    #
-    #         roll = df_eval[col].rolling (win_eff).corr (df_eval['forward_return'])
-    #         valid = roll.dropna ().values
-    #         valid_mean = valid.mean ()
-    #         valid_std = valid.std (ddof=0)
-    #         if valid_std == 0:
-    #             ir = np.nan
-    #         else:
-    #             ir = float (valid_mean / valid_std)
-    #
-    #         stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
-    #
-    #     X_sub = (df[list (stats)] - df[list (stats)].mean ()) / df[list (stats)].std ()
-    #     imputer = SimpleImputer (strategy='mean')
-    #     X_sub = imputer.fit_transform (X_sub)
-    #     pca = PCA (n_components=1)
-    #     pca.fit (X_sub)
-    #     for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
-    #         stats[f]['pca_coeff'] = float (ld)
-    #
-    #     summary = pd.DataFrame.from_dict (stats, orient='index')
-    #     for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
-    #         arr = summary[m].to_numpy (dtype=float)
-    #         if scaler == 'minmax':
-    #             mi, ma = arr.min (), arr.max ()
-    #             summary[f'{m}_norm'] = (summary[m] - mi) / (ma - mi) if ma != mi else 0.0
-    #         else:
-    #             mu, sd = arr.mean (), arr.std (ddof=0)
-    #             summary[f'{m}_norm'] = (summary[m] - mu) / sd if sd != 0 else 0.0
-    #
-    #     summary['combined_score'] = (
-    #             summary['spearman_ic_norm']
-    #             + summary['pearson_ir_norm']
-    #             + summary['pca_coeff_norm']
-    #     )
-    #     summary = summary.sort_values ('combined_score', ascending=False)
-    #     if top_k:  # 只保留 top k 个因子
-    #         summary = summary.head (top_k)
-    #         cols_to_keep = ['timestamp'] + summary.index.tolist ()
-    #         self.df_features = self.df_features[cols_to_keep]
-    #     self.summary = summary.round (self.decimals)
-    #     return self.summary
 
     def evaluate_factors (
             self,
             forward_period: int,
             window: int,
             scaler: str = 'minmax',
-            top_k: Optional[int] = None
+            top_k: Optional[int] = None,
     ) -> pd.DataFrame:
         """
-        多线程版本的 evaluate_factors：对每个因子列并行计算 Spearman IC 和滚动 IR，
-        然后在主线程中执行 PCA 权重提取和归一化 / 排序 / 截取 top_k。
+        内存友好版 evaluate_factors：按需加载每列 Parquet，
+        并用 IncrementalPCA 分批次做 PCA。
         """
-        # 1. 准备评估 DataFrame
-        df = self.df_features.set_index ('timestamp')
-        price = self.df_global[self.target_col]
-        returns = price.shift (-forward_period) / price - 1
-        df_eval = df.join (returns.rename ('forward_return')).dropna ()
+        # 1) 只加载一次：目标价格列，计算前向收益
+        price_df = load_dataframe (
+            cache_dir=self.df_global_path,  # 存放 df_global 的目录
+            n_jobs=self.n_jobs,
+            columns=[self.target_col]
+        )
+        price = price_df[self.target_col]
+        del price_df
+        returns = (price.shift (-forward_period) / price - 1).dropna ()
+        win_eff = min (window, max (1, len (returns) - 1))
 
-        win_eff = min (window, max (1, len (df_eval) - 1))
-
-        # 2. 枚举待评估的列
-        cols = [
-            c for c in df_eval.columns
-            if c != 'forward_return' and df_eval[c].nunique () > 1
+        # 2) 并行计算 Spearman IC & IR
+        factor_files = [
+            f for f in os.listdir (self.df_features_path)
+            if f.endswith ('.parquet')
         ]
 
-        # 3. 并行计算每列的 spearman_ic 和 pearson_ir
+
         stats: Dict[str, Dict[str, float]] = {}
-        futures = {self.processpool.submit (_compute_one, df_eval[[c, 'forward_return']], c, win_eff): c for c in cols}
-        for fut in tqdm (as_completed (futures), total=len (futures), desc='Evaluating'):
-            col, sp, ir = fut.result ()
-            stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
+        with ProcessPoolExecutor (max_workers=self.n_jobs) as exe:
+            futures = {exe.submit (_evaluate_factor_task_streaming, self.df_features_path,fn, win_eff, returns): fn for fn in factor_files}
+            for fut in tqdm(as_completed (futures), total=len(futures), desc='ic eval'):
+                col, sp, ir = fut.result ()
+                stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
 
-        # 4. PCA 权重提取
-        feat = df[list (stats)]
-
-        # 4.1 计算各列的均值和标准差（跳过 NaN）
-        means = feat.mean (skipna=True).astype (float)
-        stds = feat.std (ddof=0, skipna=True).astype (float)
-
-        # 4.2 将 std=0 或 NaN 的列替换成 1，避免除 0
-        stds = stds.replace (0, 1).fillna (1.0).astype (float)
-
-        # 4.3.2 标准化并把所有 NaN 填成 0
-        tmp = feat.sub (means).div (stds)
-        # 4.3.2) 直接转为 float ndarray
-        arr = tmp.to_numpy (dtype=float)
-        # 4.3.3) 在 ndarray 上把所有 NaN 变成 0
-        arr = np.nan_to_num (arr, nan=0.0)
-        # 4.3.4) 赋回 X_sub
-        X_sub = arr
-
-        # 4.4 做 PCA
+        # 3) PCA 提取一主成分权重
+        factor_names = list (stats.keys ())
+        # 一次性加载所有因子特征矩阵
+        df_pca = load_dataframe (
+            cache_dir=self.df_features_path,
+            n_jobs=self.n_jobs,
+            columns=factor_names
+        )
+        X = df_pca.to_numpy (dtype=float)
+        std_scaler = StandardScaler ()
+        X_scaled = std_scaler.fit_transform (X)
+        # 标准 PCA
         pca = PCA (n_components=1)
-        pca.fit (X_sub)
-        for f, ld in zip (stats.keys (), np.abs (pca.components_[0])):
-            stats[f]['pca_coeff'] = float (ld)
+        pca.fit (X_scaled)
+        coeffs = np.abs (pca.components_[0])
+        for f, w in zip (factor_names, coeffs):
+            stats[f]['pca_coeff'] = float (w)
 
-        # 5. 构建 summary 并归一化
+
+        # 4) 构建 summary 表并归一化
         summary = pd.DataFrame.from_dict (stats, orient='index')
-
-        # --- 并行归一化 ---
-        metrics = ['spearman_ic', 'pearson_ir', 'pca_coeff']
-        futures = {}
-        for m in metrics:
-            arr = summary[m].to_numpy (dtype=float)
-            futures[self.processpool.submit (_compute_norm, m, arr, scaler)] = m
-
-        for fut in tqdm (as_completed (futures), total=len (futures), desc='Normalizing'):
-            m = futures[fut]
-            _, norm_arr = fut.result ()
+        for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
+            _, norm_arr = _compute_norm (m, summary[m].to_numpy (dtype=float), scaler)
             summary[f'{m}_norm'] = norm_arr
 
         summary['combined_score'] = (
@@ -490,54 +531,52 @@ class FactorFactory:
                 + summary['pearson_ir_norm']
                 + summary['pca_coeff_norm']
         )
-        summary = summary.sort_values ('combined_score', ascending=False)
+        summary = summary.sort_values ('combined_score', ascending=False).round (self.decimals)
 
-        # 6. 只保留 top_k
+        # 5) 保留 top_k
         if top_k:
-            top = summary.head (top_k)
-            cols_to_keep = ['timestamp'] + top.index.tolist ()
-            self.df_features = self.df_features[cols_to_keep]
-            summary = top
+            retained = summary.head (top_k).index.tolist ()
+            # 删除未保留的 Parquet 文件
+            to_delete = [col for col in stats.keys () if col not in retained]
+            delete_parquet_files (self.df_features_path, to_delete)
+            summary = summary.loc[retained]
 
-        # 7. 存储并返回
-        self.summary = summary.round (self.decimals)
-        return self.summary
+
+        # 存回对象并返回
+        self.summary = summary
+        return summary
 
     def get_summary (self, sort_by='combined_score', ascending=False) -> pd.DataFrame:
         return self.summary.sort_values (sort_by, ascending=ascending)
 
     def next (
             self,
-            steps: int = 1,
             k: int = 1,
             mode: str = 'single',
-            n_job: Optional[int] = None,
             bounded_only: bool = False
-    ) -> pd.DataFrame:
-        for _ in tqdm (range (steps), desc="🔄 next steps"):
-            features = list (self.summary.index)
-            mat = self.df_features.set_index ('timestamp')[features].values
-            corr = np.abs (np.corrcoef (mat.T))
-            idx_map = {f: i for i, f in enumerate (features)}
+    ):
 
-            kept = [features.pop (0)]
-            while len (kept) < k and features:
-                max_corrs = [
-                    max (corr[idx_map[f], idx_map[kf]] for kf in kept)
-                    for f in features
-                ]
-                kept.append (features.pop (int (np.argmin (max_corrs))))
+        self.df_features = load_dataframe (self.df_features_path)
+        features = list (self.summary.index)
+        mat = self.df_features[features].values
+        corr = np.abs (np.corrcoef (mat.T))
+        idx_map = {f: i for i, f in enumerate (features)}
 
-            sub_df = self.df_features.set_index ('timestamp')[kept]
-            newf = self.cross_op (sub_df, mode, n_job, bounded_only)
-            merged = pd.concat ([sub_df, newf], axis=1)
-            drop_cols = merged.nunique ()[merged.nunique () <= 1].index.tolist ()
-            merged = merged.drop (columns=drop_cols).dropna ()
+        kept = [features.pop (0)]
+        while len (kept) < k and features: # 在 top-k 里贪心选 k 个因子
+            max_corrs = [
+                max (corr[idx_map[f], idx_map[kf]] for kf in kept)
+                for f in features
+            ]
+            kept.append (features.pop (int (np.argmin (max_corrs))))
 
-            self.df_features = merged.reset_index ().round (self.decimals)
-            self.evaluate_factors (**self._eval_kwargs)
+        sub_df = self.df_features[kept]
+        self.cross_op (sub_df, mode, bounded_only)
+        del sub_df; del self.df_features
+        wash(self.df_features_path)
+        self.df_features = load_dataframe (self.df_features_path)
 
-        return self.df_features
+        self.evaluate_factors (**self._eval_kwargs)
 
     def visualize_structure_2d (
             self,
@@ -547,7 +586,6 @@ class FactorFactory:
             random_state: int = 42,
             pca_evp: Optional[float] = 0.90,
             umap_components: Optional[int] = 2,
-            n_jobs: int = None
     ) -> None:
         """
         一次性绘制 6 种二维降维散点图，按 self.target_col 的前向涨跌着色。
@@ -560,7 +598,6 @@ class FactorFactory:
           - random_state: …
           - pca_evp:    PCA 保留方差比例（0< pca_evp <=1），或 None 跳过该方案；
           - umap_components: UMAP→t-SNE 首步输出维度（整型），或 None 跳过该方案；
-          - n_jobs:     并行线程数…
         """
         # ——— 1. 提取已生成的特征矩阵 & 时间索引 ———
         df_feat = self.df_features.copy ()
@@ -617,10 +654,11 @@ class FactorFactory:
                 Z = algo.fit_transform (V)
             return name, Z
 
-        futures = {self.threadpool.submit (_compute, item): item for item in reducers}
-        for fut in tqdm (as_completed (futures), total=len (futures), desc="🔄 并行降维"):
-            name, Z = fut.result ()
-            results[name] = Z
+        with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
+            futures = {executor.submit (_compute, item): item for item in reducers}
+            for fut in tqdm (as_completed (futures), total=len (futures), desc="🔄 并行降维"):
+                name, Z = fut.result ()
+                results[name] = Z
 
         # ——— 6. 绘图（2x3 网格，使用 constrained_layout） ———
         fig, axes = plt.subplots (2, 3, figsize=(18, 10), constrained_layout=True)
@@ -646,8 +684,6 @@ class FactorFactory:
             dim_reduction: str = 'none',
             reduction_params: Optional[Dict[str, Any]] = None,
             seq_len: int = 1,
-            n_jobs: int = 1,
-            backend: str = 'thread',
     ) -> pd.DataFrame:
         """
         对多种聚类算法和参数组合进行评估，并将最佳聚类标签存入 self.df_features['cluster']。
@@ -689,13 +725,6 @@ class FactorFactory:
             大于 1 时将原始 (T, d) 数据按窗口展开为
             (T-seq_len+1, seq_len*d) 样本，标签对应窗口末尾 timestamp。
 
-          - n_jobs: int，并行 worker 数量，>0。
-            backend='thread' 时启动线程池，
-            backend='process' 时启动进程池。
-
-          - backend: str，并行类型，'thread' 或 'process'。
-            'thread' 适合释放 GIL 的 sklearn 算法，
-            'process' 适合 CPU 密集型、纯 Python 任务。
         返回:
           - pd.DataFrame：每行对应一次算法+参数组合的评估，
             列包括 'algo', 各超参数, 'silhouette', 'calinski_harabasz', 'davies_bouldin'。
@@ -773,13 +802,14 @@ class FactorFactory:
                  for params in ParameterGrid (grids.get (name, {}))]
         records = []
 
-        futures = {self.threadpool.submit (_evaluate_clustering_task, *task): task for task in tasks}
-        iterator = as_completed (futures)
-        iterator = tqdm (iterator, total=len (futures), desc='Clustering eval')
-        for fut in iterator:
-            rec = fut.result ()
-            if rec:
-                records.append (rec)
+        with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
+            futures = {executor.submit (_evaluate_clustering_task, *task): task for task in tasks}
+            iterator = as_completed (futures)
+            iterator = tqdm (iterator, total=len (futures), desc='Clustering eval')
+            for fut in iterator:
+                rec = fut.result ()
+                if rec:
+                    records.append (rec)
 
         df_eval = pd.DataFrame.from_records (records)
         self.cluster_eval_ = df_eval.drop (columns=['_labels'], errors='ignore')

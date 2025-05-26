@@ -1,24 +1,31 @@
 import pandas as pd
+import numpy as np
 import ta
-import math
 from Utility.registry import factor, FACTOR_REGISTRY
 from typing import Dict, List
 
 
 # ──────────── operator functions ────────────
-def mul_func (x, y):    return x * y
+def mul_func(x, y):
+    arr = np.multiply(x, y)
+    return pd.Series(arr)
+
+def minus_func(x, y):
+    arr = np.subtract(x, y)
+    return pd.Series(arr)
+
+def div_func(x, y):
+    arr = np.divide(x, np.where(y == 0, np.nan, y))
+    return pd.Series(arr)
+
+def sin_func (x):
+    res = np.sin (x)
+    return pd.Series (res)
 
 
-def minus_func (x, y):  return x - y
-
-
-def div_func (x, y):    return x.div (y.replace (0, pd.NA))
-
-
-def sin_func (x):       return x.map (math.sin)
-
-
-def cos_func (x):       return x.map (math.cos)
+def cos_func (x):
+    res = np.cos (x)
+    return pd.Series (res)
 
 
 CROSS_OPS = [

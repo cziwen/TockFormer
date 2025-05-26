@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from sklearn.impute import SimpleImputer
 from tqdm import tqdm
 
@@ -101,6 +101,35 @@ def load_dataframe(
     result_df = pd.DataFrame(series_dict)
     return result_df
 
+def _clean(cache_dir, fname, imputer, std_threshold):
+    path = os.path.join(cache_dir, fname)
+    try:
+        # 读取单列 DataFrame，index 是 timestamp
+        df = pd.read_parquet(path)
+        col = df.columns[0]
+        series: pd.Series = df[col]
+
+        # 1. 删除全 NaN 列
+        if series.isna().all():
+            os.remove(path)
+            return fname, 'dropped empty'
+
+        # 2. 填充缺失值
+        data = series.values.reshape(-1, 1)
+        filled = imputer.fit_transform(data).ravel()
+        filled_series = pd.Series(filled, index=series.index, name=col)
+
+        # 3. 标准差判断
+        if filled_series.std(ddof=0) <= std_threshold:
+            os.remove(path)
+            return fname, 'dropped constant'
+
+        # 4. 覆盖写回，并保留 index
+        filled_series.to_frame().to_parquet(path)
+        return fname, 'imputed and kept'
+    except Exception as e:
+        return fname, f'error: {e}'
+
 def wash(
     cache_dir: str,
     n_jobs: int = None,
@@ -129,46 +158,18 @@ def wash(
     # 初始化 imputer
     imputer = SimpleImputer(strategy=impute_strategy)
 
-    def _clean(fname):
-        path = os.path.join(cache_dir, fname)
-        try:
-            # 读取单列 DataFrame，index 是 timestamp
-            df = pd.read_parquet(path)
-            col = df.columns[0]
-            series: pd.Series = df[col]
-
-            # 1. 删除全 NaN 列
-            if series.isna().all():
-                os.remove(path)
-                return fname, 'dropped empty'
-
-            # 2. 填充缺失值
-            data = series.values.reshape(-1, 1)
-            filled = imputer.fit_transform(data).ravel()
-            filled_series = pd.Series(filled, index=series.index, name=col)
-
-            # 3. 标准差判断
-            if filled_series.std(ddof=0) <= std_threshold:
-                os.remove(path)
-                return fname, 'dropped constant'
-
-            # 4. 覆盖写回，并保留 index
-            filled_series.to_frame().to_parquet(path)
-            return fname, 'imputed and kept'
-        except Exception as e:
-            return fname, f'error: {e}'
-
     count = 0
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_clean, fn): fn for fn in files}
-        for fut in as_completed(futures):
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_clean, cache_dir, fn, imputer, std_threshold): fn for fn in files}
+        pbar = tqdm (as_completed (futures), total=len (futures), desc='IO Wash')
+        for fut in pbar:
             fname = futures[fut]
             result = fut.result()
             # print(f"[IOcache][wash] {result[0]} -> {result[1]}")
             if result[1] == 'dropped empty' or result[1] == 'dropped constant':
                 count+=1
+            pbar.set_postfix(dropped=count)
 
-        tqdm.write (f"[IOcache] dropped {count} features!")
 
 
 def delete_parquet_files(

@@ -227,15 +227,8 @@ class FactorFactory:
         """
         对传入的 df（必须有 timestamp 索引），按列并行执行 FACTOR_REGISTRY 中的 func，
         每个线程只负责一个 (prefix, col) 组合。
+        不会dump，需要手动dump
         """
-        # # 备份原属性 （取消）
-        # orig_df, orig_base, orig_target = self.df_global, self.base_cols, self.target_col
-        #
-        # # 临时替换
-        # self.df_global = df.copy ()
-        # self.base_cols = cols.copy ()
-        # self.target_col = self.target_col if self.target_col in df.columns else None
-
         new_feats: Dict[str, pd.Series] = {}
         tasks = []
         for prefix, info in FACTOR_REGISTRY.items ():
@@ -260,25 +253,7 @@ class FactorFactory:
                 for key, series in out.items ():
                     new_feats[key] = pd.Series (series, index=df.index, name=key)
 
-        # 恢复原属性 (取消)
-        # self.df_global, self.base_cols, self.target_col = orig_df, orig_base, orig_target
         reg_df = pd.DataFrame (new_feats, index=df.index)
-
-        # if self.use_disk_cache and not on_memory:
-            # def _write_parquet (name_series): # （取消）
-            #     name, series = name_series
-            #     path = os.path.join (self.cache_dir, f"{name}.parquet")
-            #     series.to_frame (name).to_parquet (path)
-            #
-            # # 准备所有要写入的 (name, series)
-            # items = list (reg_df.items ())
-            # # 并行写盘
-            # with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
-            #     futures = [executor.submit (_write_parquet, item) for item in items]
-            #     for fut in tqdm (as_completed (futures), total=len (futures), desc='IO'):
-            #         fut.result ()  # 抛出可能的异常
-            # return pd.DataFrame ()
-
         return reg_df
 
     def generate_factors (self, mode: str = 'single', bounded_only: bool = False):
@@ -288,15 +263,13 @@ class FactorFactory:
 
         # 读取原始df
         self.df_global = load_dataframe(self.df_global_path)
-
-        # Compute cross features
-        self._get_cross_features (self.df_global, mode, bounded_only)
-
+        reg_df = self.apply_registry (self.df_global, self.base_cols, bounded_only)
         del self.df_global
 
+        # Compute cross features
+        self._get_cross_features (reg_df, mode, bounded_only)
 
         # clean
-        # df_feat = self._merge_clean_round ([cross_df])
         wash(self.df_features_path)
 
 

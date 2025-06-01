@@ -58,12 +58,25 @@ def _evaluate_factor_task_streaming(cache_dir: str, fname: str, win_eff: int, fr
     raw_sp = spearmanr(sub[col], sub['forward_return']).correlation
     sp = float(np.atleast_1d(raw_sp).ravel()[0])
 
-    # Rolling IR
-    roll = sub[col].rolling(win_eff).corr(sub['forward_return']).dropna().values
-    if roll.size == 0 or np.nanstd(roll, ddof=0) == 0:
+    # 计算 Rolling IR
+    # rolling_corr 里可能会出现许多 NaN
+    roll_corr = sub[col].rolling (win_eff).corr (sub['forward_return'])
+
+    # 把 NaN 去掉，只保留有效数值
+    valid_roll = roll_corr.dropna ().values
+
+    # 如果没有有效数值，或者有效数值中标准差为 0，则 IR 设为 NaN
+    if valid_roll.size == 0:
         ir = np.nan
     else:
-        ir = float(np.nanmean(roll) / np.nanstd(roll, ddof=0))
+        # 过滤后依然有值，计算均值和标准差
+        mean_roll = np.nanmean (valid_roll)
+        std_roll = np.nanstd (valid_roll, ddof=0)
+
+        if std_roll == 0:
+            ir = np.nan
+        else:
+            ir = float (mean_roll / std_roll)
 
     return col, sp, ir
 

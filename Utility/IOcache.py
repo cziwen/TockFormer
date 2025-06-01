@@ -173,8 +173,9 @@ def wash(
             # print(f"[IOcache][wash] {result[0]} -> {result[1]}")
             if result[1] == 'dropped empty' or result[1] == 'dropped constant':
                 count+=1
+            pbar.set_postfix (dropped=count)
 
-        tqdm.write(f"dropped {count} constant/nan features")
+        # tqdm.write(f"dropped {count} constant/nan features")
 
 
 

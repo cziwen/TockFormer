@@ -7,7 +7,6 @@ import umap
 import warnings
 import os
 import gc
-import shutil
 
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -35,7 +34,8 @@ from sklearn.cluster import (
 )
 from sklearn.mixture import GaussianMixture
 
-from Utility.factors import *
+from Utility.factors import CROSS_OPS
+from Utility.registry import FACTOR_REGISTRY
 from Utility.IOcache import dump_dataframe, load_dataframe, wash, delete_parquet_files
 
 
@@ -68,57 +68,99 @@ def _evaluate_factor_task_streaming(cache_dir: str, fname: str, win_eff: int, fr
     return col, sp, ir
 
 
-def _compute_norm (metric: str, arr: np.ndarray, scaler: str):
-    """
-    返回 (metric, norm_arr)，对全 NaN 或常数情况做保护。
-    """
-    # 先检测整列是否全是 NaN
-    if np.all (np.isnan (arr)):
-        return metric, np.zeros_like (arr)
+# def _compute_norm_eval_factor (metric: str, arr: np.ndarray, scaler: str):
+#     """
+#     返回 (metric, norm_arr)，对全 NaN 或常数情况做保护。
+#     """
+#     # 先检测整列是否全是 NaN
+#     if np.all (np.isnan (arr)):
+#         return metric, np.zeros_like (arr)
+#
+#     if scaler == 'minmax':
+#         # 跳过 NaN，计算 min/max
+#         mi = np.nanmin (arr)
+#         ma = np.nanmax (arr)
+#         # 如果最大最小相等，或都为 NaN（nanmin/nanmax 已跳过），填 0
+#         if ma == mi:
+#             norm = np.zeros_like (arr)
+#         else:
+#             norm = (arr - mi) / (ma - mi)
+#     else:
+#         # 跳过 NaN，计算 mean/std
+#         mu = np.nanmean (arr)
+#         sd = np.nanstd (arr, ddof=0)
+#         # 如果 std 为 0，填 0
+#         if sd == 0:
+#             norm = np.zeros_like (arr)
+#         else:
+#             norm = (arr - mu) / sd
+#
+#     # 最后把任何可能残留的 NaN（理论上不应该有）也填成 0
+#     norm = np.where (np.isnan (norm), 0.0, norm)
+#     return metric, norm
 
-    if scaler == 'minmax':
-        # 跳过 NaN，计算 min/max
-        mi = np.nanmin (arr)
-        ma = np.nanmax (arr)
-        # 如果最大最小相等，或都为 NaN（nanmin/nanmax 已跳过），填 0
-        if ma == mi:
-            norm = np.zeros_like (arr)
-        else:
-            norm = (arr - mi) / (ma - mi)
+def _compute_norm_eval_factor(
+    scale_metric: str,
+    metric: str,
+    arr: np.ndarray
+):
+    """
+    对 arr 做归一化/标准化，并处理 NaN/常数列。
+    支持三种 scale_metric：
+      - 'minmax'       : 普通 MinMaxScaler([min,max] → [0,1])
+      - 'abs_minmax'   : 先取绝对值再 MinMaxScaler([|min|,|max|] → [0,1])
+      - 其它 (e.g. 'z') : StandardScaler (z-score)
+
+    Returns
+    -------
+    metric : str
+        原 metric 名称
+    norm_arr : np.ndarray
+        与 arr 等长的归一化结果，NaN/常数列全部映射为 0。
+    """
+    # 1) NaN => 0
+    arr_filled = np.where(np.isnan(arr), 0.0, arr).reshape(-1, 1)
+
+    # 2) 选取要缩放的数据
+    if scale_metric == 'minmax':
+        arr_to_scale = arr_filled
+        scaler = MinMaxScaler()
+    elif scale_metric == 'abs_minmax':
+        arr_to_scale = np.abs(arr_filled)
+        scaler = MinMaxScaler()
     else:
-        # 跳过 NaN，计算 mean/std
-        mu = np.nanmean (arr)
-        sd = np.nanstd (arr, ddof=0)
-        # 如果 std 为 0，填 0
-        if sd == 0:
-            norm = np.zeros_like (arr)
-        else:
-            norm = (arr - mu) / sd
+        arr_to_scale = arr_filled
+        scaler = StandardScaler()
 
-    # 最后把任何可能残留的 NaN（理论上不应该有）也填成 0
-    norm = np.where (np.isnan (norm), 0.0, norm)
-    return metric, norm
+    # 3) fit-transform，并在异常时回退全 0
+    try:
+        scaled = scaler.fit_transform(arr_to_scale)
+    except Exception:
+        scaled = np.zeros_like(arr_to_scale)
+
+    # 4) 返回
+    return metric, scaled.ravel()
 
 
-def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
-    raw_sp = spearmanr (df_sub[col], df_sub['forward_return']).correlation
-    sp = float (np.atleast_1d (raw_sp).ravel ()[0])
-
-    roll = df_sub[col].rolling (win_eff).corr (df_sub['forward_return']).dropna ().values
-    # tqdm.write(f"roll.shape = {roll.shape}")
-
-    if roll.size == 0:
-        return col, sp, np.nan
-
-    # 再检查一下：如果全 NaN（dropna 后不可能），或所有值都一样，直接 NaN
-    if np.nanstd (roll, ddof=0) == 0:
-        return col, sp, np.nan
-
-    # 用 nan‐safe 版本
-    mean = np.nanmean (roll)
-    std = np.nanstd (roll, ddof=0)
-    ir = float (mean / std) if std > 0 else np.nan
-    return col, sp, ir
+# def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
+#     raw_sp = spearmanr (df_sub[col], df_sub['forward_return']).correlation
+#     sp = float (np.atleast_1d (raw_sp).ravel ()[0])
+#
+#     roll = df_sub[col].rolling (win_eff).corr (df_sub['forward_return']).dropna ().values
+#     # tqdm.write(f"roll.shape = {roll.shape}")
+#
+#     if roll.size == 0:
+#         return col, sp, np.nan
+#
+#     # 再检查一下：如果全 NaN（dropna 后不可能），或所有值都一样，直接 NaN
+#     if np.nanstd (roll, ddof=0) == 0:
+#         return col, sp, np.nan
+#
+#     # 用 nan‐safe 版本
+#     mean = np.nanmean (roll)
+#     std = np.nanstd (roll, ddof=0)
+#     ir = float (mean / std) if std > 0 else np.nan
+#     return col, sp, ir
 
 
 def _cross_apply (args):
@@ -169,7 +211,7 @@ class FactorFactory:
             target_col: str = 'close',
             forward_period: int = 1,
             window: int = 20,
-            scaler: str = 'minmax',
+            scaler: str = 'abs_minmax', # minmax
             top_k: Optional[int] = None,
             decimals: int = 6,
             n_jobs: Optional[int] = None,
@@ -278,17 +320,12 @@ class FactorFactory:
         self.evaluate_factors (**self._eval_kwargs)
         # return self.df_features
 
-    def _get_cross_features (self, feat_df: pd.DataFrame, mode: str, bounded_only: bool) -> pd.DataFrame:
+    def _get_cross_features (self, feat_df: pd.DataFrame, mode: str, bounded_only: bool):
         """
         Compute second-order (cross) features, optionally using disk cache.
         """
-        if self.use_disk_cache:
-            # Compute and cache merged features
-            df_all = self.cross_op (feat_df, mode, bounded_only)
-            return df_all
+        self.cross_op (feat_df, mode, bounded_only)
 
-        # In-memory cross features
-        return self.cross_op (feat_df, mode, bounded_only)
 
     def cross_op (
             self,
@@ -411,26 +448,7 @@ class FactorFactory:
                 feats[name] = series
 
 
-        # === 如果开启磁盘缓存，最后一次性合并所有 parquet 文件 ===
         if self.use_disk_cache:
-            # # 找出所有 parquet 文件路径 (取消)
-            # paths = [
-            #     os.path.join (self.cache_dir, f)
-            #     for f in os.listdir (self.cache_dir)
-            #     if f.endswith ('.parquet')
-            # ]
-            # # 并行读取 parquet
-            # df_list = []
-            # with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
-            #     futures = {executor.submit (pd.read_parquet, p): p for p in paths}
-            #     for fut in tqdm (as_completed (futures), total=len (paths), desc="IO"):
-            #         df_list.append (fut.result ())
-            # # 合并并清理缓存目录
-            # merged = pd.concat (df_list, axis=1)
-            # shutil.rmtree (self.cache_dir)
-
-            # merged = load_dataframe(self.df_features_path)
-            # return merged
             return pd.DataFrame () # 占位符
 
         df_new = pd.DataFrame (feats).reindex (data.index)
@@ -446,8 +464,8 @@ class FactorFactory:
             top_k: Optional[int] = None,
     ) -> pd.DataFrame:
         """
-        内存友好版 evaluate_factors：按需加载每列 Parquet，
-        并用 IncrementalPCA 分批次做 PCA。
+        evaluate_factors：按需加载每列 Parquet，
+        先筛选 top-k 个再做pca。
         """
         # 1) 只加载一次：目标价格列，计算前向收益
         price_df = load_dataframe (
@@ -474,35 +492,19 @@ class FactorFactory:
                 col, sp, ir = fut.result ()
                 stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
 
-        # 3) PCA 提取一主成分权重
-        factor_names = list (stats.keys ())
-        # 一次性加载所有因子特征矩阵
-        df_pca = load_dataframe (
-            cache_dir=self.df_features_path,
-            n_jobs=self.n_jobs,
-            columns=factor_names
-        )
-        X = df_pca.to_numpy (dtype=float)
-        std_scaler = StandardScaler ()
-        X_scaled = std_scaler.fit_transform (X)
-        # 标准 PCA
-        pca = PCA (n_components=1)
-        pca.fit (X_scaled)
-        coeffs = np.abs (pca.components_[0])
-        for f, w in zip (factor_names, coeffs):
-            stats[f]['pca_coeff'] = float (w)
-
 
         # 4) 构建 summary 表并归一化
         summary = pd.DataFrame.from_dict (stats, orient='index')
-        for m in ['spearman_ic', 'pearson_ir', 'pca_coeff']:
-            _, norm_arr = _compute_norm (m, summary[m].to_numpy (dtype=float), scaler)
-            summary[f'{m}_norm'] = norm_arr
+        with ProcessPoolExecutor (max_workers=self.n_jobs) as exe:
+            futures = {exe.submit(_compute_norm_eval_factor, scaler, m ,summary[m].to_numpy(dtype=np.float64)) for m in ['spearman_ic', 'pearson_ir']}
+            for fut in tqdm(futures, total=len(futures), desc='normalizing'):
+                m, norm_arr = fut.result ()
+                summary[f'{m}_norm'] = norm_arr
 
+        # 打分排序
         summary['combined_score'] = (
                 summary['spearman_ic_norm']
                 + summary['pearson_ir_norm']
-                + summary['pca_coeff_norm']
         )
         summary = summary.sort_values ('combined_score', ascending=False).round (self.decimals)
 
@@ -514,6 +516,37 @@ class FactorFactory:
             delete_parquet_files (self.df_features_path, to_delete)
             summary = summary.loc[retained]
 
+        # 6) 对剩下的因子做 PCA
+        #    注意：这里要用 summary.index（因子名列表），而不是 index.names
+        top_factors = summary.index.tolist ()
+        df_pca = load_dataframe (
+            cache_dir=self.df_features_path,
+            n_jobs=self.n_jobs,
+            columns=top_factors
+        )
+        X = df_pca.to_numpy (dtype=float)
+        X_scaled = StandardScaler ().fit_transform (X)
+        pca = PCA (n_components=1)
+        pca.fit (X_scaled)
+        coeffs = np.abs (pca.components_[0])
+        # 7) 把 PCA 系数注入到 summary
+        summary['pca_coeff'] = coeffs
+
+        # 8) 对 PCA 系数做归一化
+        metric, norm_arr = _compute_norm_eval_factor (
+            scaler,
+            'pca_coeff',
+            summary['pca_coeff'].to_numpy (dtype=float)
+        )
+        summary[f'{metric}_norm'] = norm_arr
+
+        # 9) 最终综合打分 & 排序
+        summary['combined_score'] = (
+                summary['spearman_ic_norm']
+                + summary['pearson_ir_norm']
+                + summary['pca_coeff_norm']
+        )
+        summary = summary.sort_values ('combined_score', ascending=False).round (self.decimals)
 
         # 存回对象并返回
         self.summary = summary

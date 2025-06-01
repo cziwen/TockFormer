@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from sklearn.impute import SimpleImputer
@@ -101,25 +102,28 @@ def load_dataframe(
     result_df = pd.DataFrame(series_dict)
     return result_df
 
-def _clean(cache_dir, fname, imputer, std_threshold):
+def _clean(cache_dir: str, fname: str, imputer, std_threshold: float):
     path = os.path.join(cache_dir, fname)
     try:
         # 读取单列 DataFrame，index 是 timestamp
         df = pd.read_parquet(path)
         col = df.columns[0]
-        series: pd.Series = df[col]
+        series: pd.Series = df[col].astype(float)
+
+        # 先把所有 ±∞ 当作 NaN
+        series.replace([np.inf, -np.inf], np.nan, inplace=True)
 
         # 1. 删除全 NaN 列
         if series.isna().all():
             os.remove(path)
             return fname, 'dropped empty'
 
-        # 2. 填充缺失值
+        # 2. 填充缺失值（包含原本的 NaN 和 ±∞）
         data = series.values.reshape(-1, 1)
         filled = imputer.fit_transform(data).ravel()
         filled_series = pd.Series(filled, index=series.index, name=col)
 
-        # 3. 标准差判断
+        # 3. 标准差判断：去掉方差过小的列
         if filled_series.std(ddof=0) <= std_threshold:
             os.remove(path)
             return fname, 'dropped constant'
@@ -127,6 +131,7 @@ def _clean(cache_dir, fname, imputer, std_threshold):
         # 4. 覆盖写回，并保留 index
         filled_series.to_frame().to_parquet(path)
         return fname, 'imputed and kept'
+
     except Exception as e:
         return fname, f'error: {e}'
 
@@ -168,7 +173,8 @@ def wash(
             # print(f"[IOcache][wash] {result[0]} -> {result[1]}")
             if result[1] == 'dropped empty' or result[1] == 'dropped constant':
                 count+=1
-            pbar.set_postfix(dropped=count)
+
+        tqdm.write(f"dropped {count} constant/nan features")
 
 
 

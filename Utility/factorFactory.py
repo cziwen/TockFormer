@@ -38,25 +38,27 @@ from Utility.factors import CROSS_OPS
 from Utility.registry import FACTOR_REGISTRY
 from Utility.IOcache import dump_dataframe, load_dataframe, wash, delete_parquet_files
 
+from Utility.Util import clean_and_interpolate
+
 
 # ================ Pickle Function ================
 
-def _evaluate_factor_task_streaming(cache_dir: str, fname: str, win_eff: int, fr:pd.Series):
+def _evaluate_factor_task_streaming (cache_dir: str, fname: str, win_eff: int, fr: pd.Series):
     """
     Module-level helper to compute Spearman IC and Pearson IR for a single factor column.
     """
-    path = os.path.join(cache_dir, fname)
-    df = pd.read_parquet(path)
+    path = os.path.join (cache_dir, fname)
+    df = pd.read_parquet (path)
     col = df.columns[0]
     series = df[col]
 
     # Align and drop NaNs
-    series = series.reindex(fr.index)
-    sub = pd.DataFrame({col: series, 'forward_return': fr}).dropna()
+    series = series.reindex (fr.index)
+    sub = pd.DataFrame ({col: series, 'forward_return': fr}).dropna ()
 
     # Spearman IC
-    raw_sp = spearmanr(sub[col], sub['forward_return']).correlation
-    sp = float(np.atleast_1d(raw_sp).ravel()[0])
+    raw_sp = spearmanr (sub[col], sub['forward_return']).correlation
+    sp = float (np.atleast_1d (raw_sp).ravel ()[0])
 
     # 计算 Rolling IR
     # rolling_corr 里可能会出现许多 NaN
@@ -112,10 +114,10 @@ def _evaluate_factor_task_streaming(cache_dir: str, fname: str, win_eff: int, fr
 #     norm = np.where (np.isnan (norm), 0.0, norm)
 #     return metric, norm
 
-def _compute_norm_eval_factor(
-    scale_metric: str,
-    metric: str,
-    arr: np.ndarray
+def _compute_norm_eval_factor (
+        scale_metric: str,
+        metric: str,
+        arr: np.ndarray
 ):
     """
     对 arr 做归一化/标准化，并处理 NaN/常数列。
@@ -132,27 +134,27 @@ def _compute_norm_eval_factor(
         与 arr 等长的归一化结果，NaN/常数列全部映射为 0。
     """
     # 1) NaN => 0
-    arr_filled = np.where(np.isnan(arr), 0.0, arr).reshape(-1, 1)
+    arr_filled = np.where (np.isnan (arr), 0.0, arr).reshape (-1, 1)
 
     # 2) 选取要缩放的数据
     if scale_metric == 'minmax':
         arr_to_scale = arr_filled
-        scaler = MinMaxScaler()
+        scaler = MinMaxScaler ()
     elif scale_metric == 'abs_minmax':
-        arr_to_scale = np.abs(arr_filled)
-        scaler = MinMaxScaler()
+        arr_to_scale = np.abs (arr_filled)
+        scaler = MinMaxScaler ()
     else:
         arr_to_scale = arr_filled
-        scaler = StandardScaler()
+        scaler = StandardScaler ()
 
     # 3) fit-transform，并在异常时回退全 0
     try:
-        scaled = scaler.fit_transform(arr_to_scale)
+        scaled = scaler.fit_transform (arr_to_scale)
     except Exception:
-        scaled = np.zeros_like(arr_to_scale)
+        scaled = np.zeros_like (arr_to_scale)
 
     # 4) 返回
-    return metric, scaled.ravel()
+    return metric, scaled.ravel ()
 
 
 # def _compute_one (df_sub: pd.DataFrame, col: str, win_eff: int):
@@ -224,7 +226,7 @@ class FactorFactory:
             target_col: str = 'close',
             forward_period: int = 1,
             window: int = 20,
-            scaler: str = 'abs_minmax', # minmax
+            scaler: str = 'abs_minmax',  # minmax
             top_k: Optional[int] = None,
             decimals: int = 6,
             n_jobs: Optional[int] = None,
@@ -240,7 +242,6 @@ class FactorFactory:
         self.use_disk_cache = use_disk_cache
         self.cache_dir = cache_dir
 
-
         # 原始数据按 timestamp 索引
         self.df_global = (
             df.copy ()
@@ -248,7 +249,7 @@ class FactorFactory:
             .set_index ('timestamp')
         )
         self.df_global_path = f'{cache_dir}/df_global'
-        dump_dataframe(self.df_global, self.df_global_path, clear=True) # 磁盘化
+        dump_dataframe (self.df_global, self.df_global_path, clear=True)  # 磁盘化
 
         self.base_cols = (
             base_cols if base_cols is not None
@@ -265,7 +266,7 @@ class FactorFactory:
 
         self.df_features_path = f'{cache_dir}/df_features'
         self.df_features = pd.DataFrame ()
-        dump_dataframe(self.df_features, self.df_features_path, clear=True)
+        dump_dataframe (self.df_features, self.df_features_path, clear=True)
 
         self.summary = pd.DataFrame ()
 
@@ -293,8 +294,8 @@ class FactorFactory:
             if bounded_only and 'bounded' not in tags:
                 continue
             # 对每个 col 单独提交一个任务
-            for col in cols:
-                tasks.append ((prefix, info['func'], col))
+            for col in cols: \
+                    tasks.append ((prefix, info['func'], col))
 
         # 多进程执行
         with ProcessPoolExecutor (max_workers=self.n_jobs) as executor:
@@ -309,6 +310,7 @@ class FactorFactory:
                     new_feats[key] = pd.Series (series, index=df.index, name=key)
 
         reg_df = pd.DataFrame (new_feats, index=df.index)
+        reg_df = clean_and_interpolate (reg_df, tol=0.01)
         return reg_df
 
     def generate_factors (self, mode: str = 'single', bounded_only: bool = False):
@@ -317,7 +319,7 @@ class FactorFactory:
         """
 
         # 读取原始df
-        self.df_global = load_dataframe(self.df_global_path)
+        self.df_global = load_dataframe (self.df_global_path)
         reg_df = self.apply_registry (self.df_global, self.base_cols, bounded_only)
         del self.df_global
 
@@ -325,8 +327,7 @@ class FactorFactory:
         self._get_cross_features (reg_df, mode, bounded_only)
 
         # clean
-        wash(self.df_features_path)
-
+        wash (self.df_features_path)
 
         # 3) Store and evaluate
         # self.df_features = df_feat.reset_index ()
@@ -338,7 +339,6 @@ class FactorFactory:
         Compute second-order (cross) features, optionally using disk cache.
         """
         self.cross_op (feat_df, mode, bounded_only)
-
 
     def cross_op (
             self,
@@ -358,7 +358,7 @@ class FactorFactory:
         )
 
         if self.use_disk_cache:
-            dump_dataframe(reg_df, self.df_features_path) # 磁盘化
+            dump_dataframe (reg_df, self.df_features_path)  # 磁盘化
             del reg_df
         else:
             feats.update (reg_df.to_dict ('series'))
@@ -384,18 +384,16 @@ class FactorFactory:
         compute_futs = {compute_pool.submit (_process_unary, t): t for t in unary_tasks}
 
         unary_futures: Dict[str, pd.Series] = {}
-        for fut in tqdm(as_completed(compute_futs), total=len (compute_futs), desc='🔄 Unary op'):
+        for fut in tqdm (as_completed (compute_futs), total=len (compute_futs), desc='🔄 Unary op'):
             name, series = fut.result ()
             unary_futures[name] = series
 
-        dump_dataframe(pd.DataFrame(unary_futures, index=data.index), self.df_features_path)
+        dump_dataframe (pd.DataFrame (unary_futures, index=data.index), self.df_features_path)
         del unary_futures
 
         # 等待所有线程池任务完成 (取消)
         compute_pool.shutdown (wait=True)
         gc.collect ()
-
-
 
         # —— 二元算子构造任务列表 ——
         dd = data.to_dict ('series')
@@ -460,14 +458,12 @@ class FactorFactory:
                 name, series = _cross_apply (t)
                 feats[name] = series
 
-
         if self.use_disk_cache:
-            return pd.DataFrame () # 占位符
+            return pd.DataFrame ()  # 占位符
 
         df_new = pd.DataFrame (feats).reindex (data.index)
         df_new.index.name = 'timestamp'
         return df_new
-
 
     def evaluate_factors (
             self,
@@ -497,20 +493,20 @@ class FactorFactory:
             if f.endswith ('.parquet')
         ]
 
-
         stats: Dict[str, Dict[str, float]] = {}
         with ProcessPoolExecutor (max_workers=self.n_jobs) as exe:
-            futures = {exe.submit (_evaluate_factor_task_streaming, self.df_features_path,fn, win_eff, returns): fn for fn in factor_files}
-            for fut in tqdm(as_completed (futures), total=len(futures), desc='ic eval'):
+            futures = {exe.submit (_evaluate_factor_task_streaming, self.df_features_path, fn, win_eff, returns): fn for
+                       fn in factor_files}
+            for fut in tqdm (as_completed (futures), total=len (futures), desc='ic eval'):
                 col, sp, ir = fut.result ()
                 stats[col] = {'spearman_ic': sp, 'pearson_ir': ir}
-
 
         # 4) 构建 summary 表并归一化
         summary = pd.DataFrame.from_dict (stats, orient='index')
         with ProcessPoolExecutor (max_workers=self.n_jobs) as exe:
-            futures = {exe.submit(_compute_norm_eval_factor, scaler, m ,summary[m].to_numpy(dtype=np.float64)) for m in ['spearman_ic', 'pearson_ir']}
-            for fut in tqdm(futures, total=len(futures), desc='normalizing'):
+            futures = {exe.submit (_compute_norm_eval_factor, scaler, m, summary[m].to_numpy (dtype=np.float64)) for m
+                       in ['spearman_ic', 'pearson_ir']}
+            for fut in tqdm (futures, total=len (futures), desc='normalizing'):
                 m, norm_arr = fut.result ()
                 summary[f'{m}_norm'] = norm_arr
 
@@ -582,7 +578,7 @@ class FactorFactory:
         idx_map = {f: i for i, f in enumerate (features)}
 
         kept = [features.pop (0)]
-        while len (kept) < k and features: # 在 top-k 里贪心选 k 个因子
+        while len (kept) < k and features:  # 在 top-k 里贪心选 k 个因子
             max_corrs = [
                 max (corr[idx_map[f], idx_map[kf]] for kf in kept)
                 for f in features
@@ -591,8 +587,9 @@ class FactorFactory:
 
         sub_df = self.df_features[kept]
         self.cross_op (sub_df, mode, bounded_only)
-        del sub_df; del self.df_features
-        wash(self.df_features_path)
+        del sub_df;
+        del self.df_features
+        wash (self.df_features_path)
         self.df_features = load_dataframe (self.df_features_path)
 
         self.evaluate_factors (**self._eval_kwargs)
@@ -608,41 +605,59 @@ class FactorFactory:
     ) -> None:
         """
         一次性绘制 6 种二维降维散点图，按 self.target_col 的前向涨跌着色。
-        支持多线程并行计算降维结果，进度条覆盖滑窗展开和并行降维阶段。
-
-        参数：
-          - seq_len: …
-          - perplexity: …
-          - n_neighbors: …
-          - random_state: …
-          - pca_evp:    PCA 保留方差比例（0< pca_evp <=1），或 None 跳过该方案；
-          - umap_components: UMAP→t-SNE 首步输出维度（整型），或 None 跳过该方案；
+        先把 df_feat 和 target_df 在 timestamp 上对齐，再做滑窗 & 打标签。
         """
-        # ——— 1. 提取已生成的特征矩阵 & 时间索引 ———
-        df_feat = self.df_features.copy ()
-        timestamps = df_feat['timestamp']
-        X = df_feat.drop (columns=['timestamp']).values  # (T, d)
-        T, d = X.shape
 
-        # ——— 2. 计算前向收益 & 对齐标签 ———
+        # ——— 1. 读取特征 & 目标，并按 timestamp 对齐索引 ———
+        # 1.1 加载 df_feat，index 是时间戳
+        df_feat = load_dataframe (self.df_features_path)
+        df_feat = df_feat.sort_index ()
+
+        # 1.2 加载 target_df，只保留 target 列，同样以 timestamp 为索引并排序
+        target_df = load_dataframe (self.df_global_path, n_jobs=self.n_jobs, columns=[self.target_col])
+        if 'timestamp' in target_df.columns:
+            target_df = target_df.set_index ('timestamp')
+        target_df = target_df.sort_index ()
+
+        # 1.3 取索引交集，只保留两个 DataFrame 都存在的时间戳
+        common_index = df_feat.index.intersection (target_df.index)
+        if len (common_index) < seq_len:
+            raise RuntimeError (f"对齐后共同的时间戳只有 {len (common_index)} 行，无法做 seq_len={seq_len} 的滑窗")
+
+        # 1.4 只保留交集部分
+        df_feat = df_feat.loc[common_index]
+        target_series = target_df.loc[common_index, self.target_col]
+
+        # ——— 2. 计算前向收益 & 生成对齐后的 forward_ret ———
         fp = self._eval_kwargs['forward_period']
-        forward_ret = (
-                self.df_global[self.target_col].shift (-fp)
-                / self.df_global[self.target_col]
-                - 1
-        )
-        aligned_forward = forward_ret.reindex (timestamps).reset_index (drop=True)
+        forward_ret = target_series.shift (-fp) / target_series - 1
+        # 注意：末尾 fp 个索引会变为 NaN
 
         # ——— 3. 滑窗展开 & 标准化（带进度条） ———
-        N = T - seq_len + 1
+        #    这里 T 是对齐后 df_feat 的行数
+        X = df_feat.values  # 形状 (T, d)
+        T, d = X.shape
+        N = T - seq_len + 1  # 可滑出的窗口数
+        if N <= 0:
+            raise RuntimeError (f"T={T} 不足以做 seq_len={seq_len} 的滑窗")
+
         V = np.empty ((N, seq_len * d), dtype=float)
         for i in tqdm (range (N), desc="🔄 窗口展平"):
             V[i, :] = X[i:i + seq_len, :].flatten ()
+        # 对每一列做 (x - mean)/std
         V = (V - V.mean (axis=0)) / (V.std (axis=0, ddof=0) + 1e-8)
 
-        # ——— 4. 生成涨跌标签 ———
-        labels = (aligned_forward.iloc[seq_len - 1: seq_len - 1 + N] >= 0)
-        labels = labels.astype (int).to_numpy ()
+        # ——— 4. 生成涨跌标签（对齐后再切片） ———
+        # 第 i 个窗口对应的标签索引是： i + (seq_len - 1)
+        # 所以要取 forward_ret.iloc[seq_len-1 : seq_len-1 + N]
+        raw_slice = forward_ret.iloc[seq_len - 1: seq_len - 1 + N]
+        # 如果对齐后 forward_ret 中这段有 NaN，需要谨慎处理：
+        # 这里我们先直接 (>=0)，NaN 会被判成 False → 0
+        # labels = (raw_slice >= 0).astype (int).to_numpy ()
+        # 如果想跳过 NaN 样本，也可以：
+        mask_valid = raw_slice.notna()
+        V = V[mask_valid.values]
+        labels = (raw_slice[mask_valid] >= 0).astype(int).to_numpy()
 
         # ——— 5. 定义降维任务列表 ———
         reducers = [
@@ -655,34 +670,28 @@ class FactorFactory:
         ]
         results = {}
 
-        # 并行计算降维
-
         def _compute (item):
             name, algo = item
             if name == f'PCA({pca_evp * 100:.2f}%)→t-SNE':
-                V_pca90 = PCA (n_components=algo, random_state=random_state).fit_transform (V)
-                Z = TSNE (n_components=2, perplexity=perplexity, random_state=random_state).fit_transform (V_pca90)
+                V_pca = PCA (n_components=algo, random_state=random_state).fit_transform (V)
+                Z = TSNE (n_components=2, perplexity=perplexity, random_state=random_state).fit_transform (V_pca)
             elif name == f'UMAP({umap_components})→t-SNE':
-                V_umap_components = umap.UMAP (
-                    n_neighbors=n_neighbors,
-                    n_components=algo,
-                ).fit_transform (V)
-                Z = TSNE (n_components=2, perplexity=perplexity, random_state=random_state).fit_transform (
-                    V_umap_components)
+                V_umap = umap.UMAP (n_neighbors=n_neighbors, n_components=algo).fit_transform (V)
+                Z = TSNE (n_components=2, perplexity=perplexity, random_state=random_state).fit_transform (V_umap)
             else:
                 Z = algo.fit_transform (V)
             return name, Z
 
+        # ——— 6. 并行计算降维 ———
         with ThreadPoolExecutor (max_workers=self.n_jobs) as executor:
             futures = {executor.submit (_compute, item): item for item in reducers}
             for fut in tqdm (as_completed (futures), total=len (futures), desc="🔄 并行降维"):
                 name, Z = fut.result ()
                 results[name] = Z
 
-        # ——— 6. 绘图（2x3 网格，使用 constrained_layout） ———
+        # ——— 7. 绘图（2x3 网格，使用 constrained_layout） ———
         fig, axes = plt.subplots (2, 3, figsize=(18, 10), constrained_layout=True)
         cm = plt.cm.coolwarm
-
         for ax, (title, Z) in zip (axes.flatten (), results.items ()):
             sc = ax.scatter (Z[:, 0], Z[:, 1], c=labels, cmap=cm, s=10, alpha=0.7)
             ax.set_title (title, fontsize=12)
@@ -782,11 +791,12 @@ class FactorFactory:
         metrics = metrics or ['silhouette', 'calinski_harabasz', 'davies_bouldin']
 
         # 构造 X 和时间索引
-        df = self.df_features.drop (columns=['cluster'], errors='ignore').copy ()
+        df = load_dataframe (self.df_features_path)
         # 仅保留因子特征列，排除 timestamp 和 cluster（防止 NaN 引入）
         feature_cols = [c for c in df.columns if c not in ('timestamp', 'cluster')]
         X0 = df[feature_cols].values
-        times = df['timestamp'].tolist ()
+        # times = df['timestamp'].tolist ()
+        times = df.index.tolist()
         if seq_len > 1:
             T, d = X0.shape
             N = T - seq_len + 1
@@ -831,7 +841,6 @@ class FactorFactory:
                     records.append (rec)
 
         df_eval = pd.DataFrame.from_records (records)
-        self.cluster_eval_ = df_eval.drop (columns=['_labels'], errors='ignore')
 
         # 综合绘图
         plt.figure ()

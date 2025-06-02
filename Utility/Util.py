@@ -343,3 +343,56 @@ def evaluate_time_series_ic (
     if window and window > 1:
         cols_out += ['ic_sw_mean', 'ic_sw_std', 'ir_sw']
     return result[cols_out]
+
+def clean_and_interpolate(df: pd.DataFrame, tol: float = 0.05) -> pd.DataFrame:
+    """
+    1. 丢弃 DataFrame 开头连续出现任何 NaN 的行（“前几个含有 null 的行”）。
+    2. 对剩余部分，每列如果缺失值占比 ≤ tol，就用线性插值填充；如果 > tol，则整列删除。
+
+    Args:
+        df: 待清洗的 DataFrame，索引可保留原始时间戳或其它索引。
+        tol: 单列允许填充的最大缺失比例（默认为 0.05 即 5%）。
+
+    Returns:
+        经过清洗和插值处理后的 DataFrame。
+        - 已删除开头连续含 NaN 的行
+        - 对每列缺失值比例 ≤ tol 的，已做线性插值
+        - 对每列缺失值比例 > tol 的，已删除该列
+    """
+    # 1. 复制一份，避免修改原始 DataFrame
+    df_clean = df.copy()
+
+    # 2. 找到开头连续含有 NaN 的行数
+    #    mask[i] = True 表示 df_clean.iloc[i] 这一整行里有至少一个 NaN
+    mask = df_clean.isnull().any(axis=1).tolist()
+    #    找到第一个 mask[i] == False 的位置 pos，若全是 True，则 pos 为 None
+    pos = next((i for i, has_nan in enumerate(mask) if not has_nan), None)
+
+    #    如果所有行都含 NaN，就直接返回空的 DataFrame
+    if pos is None:
+        return pd.DataFrame(columns=df_clean.columns)
+
+    #    丢弃开头 pos 行
+    df_clean = df_clean.iloc[pos:].copy()
+
+    # 3. 对剩余部分按列检查缺失比例并决定插值或删除
+    n_rows = len(df_clean)
+    for col in list(df_clean.columns):
+        null_count = df_clean[col].isnull().sum()
+        if null_count == 0:
+            # 该列无缺失，跳过
+            continue
+
+        frac = null_count / n_rows
+        if frac <= tol:
+            # 缺失比例在允许范围内，做线性插值
+            # 保留原来索引，method='linear'
+            df_clean[col] = df_clean[col].interpolate(method='linear')
+            # 如果边缘仍有 NaN（如首尾），可以再向前后填补或直接保留 NaN
+            # 通常线性插值后，首尾的 NaN 会保留；如果想再用前向/后向填充，可按需添加：
+            # df_clean[col] = df_clean[col].fillna(method='ffill').fillna(method='bfill')
+        else:
+            # 缺失比例过高，删除整列
+            df_clean.drop(columns=[col], inplace=True)
+
+    return df_clean

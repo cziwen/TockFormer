@@ -329,10 +329,8 @@ class FactorFactory:
         # clean
         wash (self.df_features_path)
 
-        # 3) Store and evaluate
-        # self.df_features = df_feat.reset_index ()
+        # Store and evaluate
         self.evaluate_factors (**self._eval_kwargs)
-        # return self.df_features
 
     def _get_cross_features (self, feat_df: pd.DataFrame, mode: str, bounded_only: bool):
         """
@@ -358,7 +356,7 @@ class FactorFactory:
         )
 
         if self.use_disk_cache:
-            dump_dataframe (reg_df, self.df_features_path)  # 磁盘化
+            dump_dataframe (reg_df, self.df_features_path, clear=True)  # 磁盘化
             del reg_df
         else:
             feats.update (reg_df.to_dict ('series'))
@@ -520,12 +518,14 @@ class FactorFactory:
         # 5) 保留 top_k
         if top_k:
             retained = summary.head (top_k).index.tolist ()
-            # 删除未保留的 Parquet 文件
-            to_delete = [col for col in stats.keys () if col not in retained]
-            delete_parquet_files (self.df_features_path, to_delete)
+            # 删除未保留的 Parquet 文件 (dump时自动删除不需要的)
+            # to_delete = [col for col in stats.keys () if col not in retained]
+            # delete_parquet_files (self.df_features_path, to_delete)
             summary = summary.loc[retained]
 
-        # 6) 对剩下的因子做 PCA
+
+
+        # 5.1) 对齐时间+impute
         #    注意：这里要用 summary.index（因子名列表），而不是 index.names
         top_factors = summary.index.tolist ()
         df_pca = load_dataframe (
@@ -533,6 +533,11 @@ class FactorFactory:
             n_jobs=self.n_jobs,
             columns=top_factors
         )
+
+        df_pca = clean_and_interpolate(df_pca) # 对齐时间
+        dump_dataframe(df_pca, self.df_features_path, clear=True) # 存储过滤对齐后的
+
+        # 6) 对剩下的因子做 PCA
         X = df_pca.to_numpy (dtype=float)
         X_scaled = StandardScaler ().fit_transform (X)
         pca = PCA (n_components=1)
@@ -585,18 +590,24 @@ class FactorFactory:
             ]
             kept.append (features.pop (int (np.argmin (max_corrs))))
 
-        sub_df = self.df_features[kept]
+        sub_df = self.df_features[kept] # 保留需要计算的因子
         self.cross_op (sub_df, mode, bounded_only)
         del sub_df;
         del self.df_features
         wash (self.df_features_path)
-        self.df_features = load_dataframe (self.df_features_path)
+
+        # 对齐时间，补齐数据
+        df_unaligned = load_dataframe (self.df_features_path)
+        df_aligned = clean_and_interpolate(df_unaligned)
+        dump_dataframe(df_aligned, self.df_features_path, clear=True)
+        del df_unaligned, df_aligned
 
         self.evaluate_factors (**self._eval_kwargs)
 
     def visualize_structure_2d (
             self,
             seq_len: int,
+            percentage: float = 1,
             perplexity: float = 30.0,
             n_neighbors: int = 10,
             random_state: int = 42,
@@ -610,7 +621,7 @@ class FactorFactory:
 
         # ——— 1. 读取特征 & 目标，并按 timestamp 对齐索引 ———
         # 1.1 加载 df_feat，index 是时间戳
-        df_feat = load_dataframe (self.df_features_path)
+        df_feat = load_dataframe (self.df_features_path, percentage=percentage)
         df_feat = df_feat.sort_index ()
 
         # 1.2 加载 target_df，只保留 target 列，同样以 timestamp 为索引并排序
@@ -712,6 +723,7 @@ class FactorFactory:
             dim_reduction: str = 'none',
             reduction_params: Optional[Dict[str, Any]] = None,
             seq_len: int = 1,
+            percentage: float = 1,
     ) -> pd.DataFrame:
         """
         对多种聚类算法和参数组合进行评估，并将最佳聚类标签存入 self.df_features['cluster']。
@@ -791,7 +803,7 @@ class FactorFactory:
         metrics = metrics or ['silhouette', 'calinski_harabasz', 'davies_bouldin']
 
         # 构造 X 和时间索引
-        df = load_dataframe (self.df_features_path)
+        df = load_dataframe (self.df_features_path, percentage=percentage)
         # 仅保留因子特征列，排除 timestamp 和 cluster（防止 NaN 引入）
         feature_cols = [c for c in df.columns if c not in ('timestamp', 'cluster')]
         X0 = df[feature_cols].values

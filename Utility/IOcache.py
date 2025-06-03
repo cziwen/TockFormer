@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import random
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from sklearn.impute import SimpleImputer
 from tqdm import tqdm
@@ -52,19 +53,72 @@ def dump_dataframe(
                 print(f"[IOcache] 写入列 {col} 时出错: {e}")
 
 
+# def load_dataframe(
+#     cache_dir: str,
+#     n_jobs: int = None,
+#     columns: list[str] = None
+# ) -> pd.DataFrame:
+#     """
+#     并行读取 cache_dir 下指定或所有 .parquet 列文件，
+#     合并并返回 DataFrame。
+#
+#     Args:
+#         cache_dir: 读取目录路径
+#         n_jobs: 最大线程数，默认使用 CPU 核心数
+#         columns: 要加载的列名列表，None 表示加载目录下所有列
+#
+#     Returns:
+#         pd.DataFrame: 合并后的 DataFrame，列顺序与 columns 一致或按文件名排序
+#     """
+#     if not os.path.isdir(cache_dir):
+#         raise FileNotFoundError(f"目录不存在: {cache_dir}")
+#
+#     all_files = [f for f in os.listdir(cache_dir) if f.endswith('.parquet')]
+#     # 过滤指定列
+#     if columns is not None:
+#         target_files = [f"{col}.parquet" for col in columns if f"{col}.parquet" in all_files]
+#     else:
+#         target_files = all_files
+#
+#     workers = n_jobs or os.cpu_count()
+#     series_dict: dict[str, pd.Series] = {}
+#
+#     def _load(fname):
+#         col_name = os.path.splitext(fname)[0]
+#         df_col = pd.read_parquet(os.path.join(cache_dir, fname))
+#         # 单列 DataFrame 转 Series
+#         return col_name, df_col[col_name]
+#
+#     with ThreadPoolExecutor(max_workers=workers) as executor:
+#         futures = {executor.submit(_load, fn): fn for fn in target_files}
+#         for fut in tqdm(as_completed(futures), total=len(futures), desc='IO Load'):
+#             fname = futures[fut]
+#             try:
+#                 col_name, series = fut.result()
+#                 series_dict[col_name] = series
+#             except Exception as e:
+#                 print(f"[IOcache] 读取文件 {fname} 时出错: {e}")
+#
+#     # 合并所有 Series
+#     result_df = pd.DataFrame(series_dict)
+#     return result_df
+
+
 def load_dataframe(
     cache_dir: str,
     n_jobs: int = None,
-    columns: list[str] = None
+    columns: list[str] = None,
+    percentage: float = 1.0  # 新增参数：加载比例（0.0 < percentage ≤ 1.0）
 ) -> pd.DataFrame:
     """
     并行读取 cache_dir 下指定或所有 .parquet 列文件，
-    合并并返回 DataFrame。
+    合并并返回 DataFrame，并可选择加载一定比例的连续 index 段。
 
     Args:
         cache_dir: 读取目录路径
         n_jobs: 最大线程数，默认使用 CPU 核心数
         columns: 要加载的列名列表，None 表示加载目录下所有列
+        percentage: 加载数据的百分比（0.0 < percentage ≤ 1.0）。若 <1，则随机选取连续区间。
 
     Returns:
         pd.DataFrame: 合并后的 DataFrame，列顺序与 columns 一致或按文件名排序
@@ -79,14 +133,42 @@ def load_dataframe(
     else:
         target_files = all_files
 
+    # 验证 percentage 参数
+    if not (0.0 < percentage <= 1.0):
+        raise ValueError("percentage 必须在 (0.0, 1.0] 之间")
+
+    # 先决定切片区间的 start/end（基于第一个文件的行数）
+    start, end = None, None
+    if percentage < 1.0:
+        # 取第一个文件名来获取总行数
+        first_fname = target_files[0]
+        first_col = os.path.splitext(first_fname)[0]
+        df0 = pd.read_parquet(os.path.join(cache_dir, first_fname))
+        # 确保 index 有序，再取行数
+        df0 = df0.sort_index()
+        total_rows = len(df0[first_col])
+        n_rows = int(total_rows * percentage)
+        if n_rows < 1:
+            raise ValueError("根据 percentage 计算得到的行数不足 1 行，请增大 percentage")
+        max_start = total_rows - n_rows
+        start = random.randint(0, max_start)
+        end = start + n_rows
+        # 释放 df0 占用
+        del df0
+
     workers = n_jobs or os.cpu_count()
     series_dict: dict[str, pd.Series] = {}
 
     def _load(fname):
         col_name = os.path.splitext(fname)[0]
         df_col = pd.read_parquet(os.path.join(cache_dir, fname))
-        # 单列 DataFrame 转 Series
-        return col_name, df_col[col_name]
+        series = df_col[col_name]
+        # 保证 index 有序，方便 iloc 切片
+        series = series.sort_index()
+        # 如果需要抽取连续区间，就在这里切片
+        if start is not None and end is not None:
+            series = series.iloc[start:end]
+        return col_name, series
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_load, fn): fn for fn in target_files}
@@ -98,7 +180,7 @@ def load_dataframe(
             except Exception as e:
                 print(f"[IOcache] 读取文件 {fname} 时出错: {e}")
 
-    # 合并所有 Series
+    # 合并所有已切片的 Series
     result_df = pd.DataFrame(series_dict)
     return result_df
 
